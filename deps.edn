@@ -1,0 +1,8 @@
+{:paths ["src" "target/src"]
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.0-alpha4"}
+        org.clojure/clojurescript {:mvn/version "1.11.60"}
+        me.raynes/fs {:mvn/version "1.4.6"}}
+
+ :aliases
+ {}}

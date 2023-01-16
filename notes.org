@@ -1,0 +1,73 @@
+#+title: Notes
+
+** context
+While refactoring the [[file:~/Code/nemesis/src/poly/notes.org::+title: Poly][nemesis/poly]] project, I was drawn to rethink about a better way to structure clojure projects.
+*** project structure
+Maybe introduce some constraint about dependencies
+When working on a large project it is sometimes difficult to keep track of the chain reaction of a change
+With some convention we could maybe ease things a bit
+- a child module do not know or assumes anything from its parent
+  this simple constraint reduce nicely the tracking complexity and the composability
+- a module can combine some children to create a composite one
+  children are evaluated in order, only the already defined ones are available to be composed
+
+
+* Clodule
+
+The idea is to be able to write multi namespace code in one file.
+
+I try to escape the burden of files and optimize code edition and navigation in one buffer.
+with the help of emacs folding and structural navigation/edition it could be a fine way to code.
+
+#+begin_src clojure
+(* root
+ (* one ...)
+ (* two ...)
+ ...
+ (* three
+    {:compose [one two]}
+    (defn fun [x]
+      (two/f (one/g x) ...))))
+#+end_src
+
+modules, functions, expressions are not so different
+they have dependencies and sometimes needs arguments
+
+#+begin_src clojure
+{:name root
+ :use []
+ :need []
+ :content [{:name one
+            :use []
+            :need []
+            :content []}
+           {:name two
+            :use []
+            :need []
+            :content []}
+           ...
+           {:name three
+            :use {one one two two}
+            :need []
+            :content [{:name fun
+                       :need [x]
+                       :return (two/f (one/g x) ...)}]}]}
+#+end_src
+
+
+The three main types of definition we will deal with are:
+
+
+| type     | equivalent | required fields     | mandatory fields |
+|----------+------------+---------------------+------------------|
+| value    | def        | :name :value        | :use             |
+| function | defn       | :name :need :return | :use :body       |
+| module   | ns         | :name :content      | :use :need       |
+|----------+------------+---------------------+------------------|
+
+** Roadmap
+
+- parsing
+- namespace emission (without parametric modules)
+- automatic reloading
+- in-file evaluation

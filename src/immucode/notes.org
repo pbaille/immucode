@@ -1,0 +1,5 @@
+#+title: Immutable coding
+
+
+<2023-01-17 Tue>
+I would like the whole coding environment to be immutable

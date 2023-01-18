@@ -1,2 +1,3 @@
 {:linters {}
- :lint-as {clodule.core/code clojure.core/comment}}
+ :lint-as {clodule.core/code clojure.core/comment}
+ :hooks {:macroexpand {immucode.core/program hooks.immucode/program}}}

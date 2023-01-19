@@ -1,6 +1,7 @@
 (ns immucode.tree
   (:refer-clojure :exclude [find])
-  (:require [immucode.path :as path]))
+  (:require [immucode.path :as path]
+            [immucode.utils :as u]))
 
 (defn cd
   [tree path]
@@ -55,47 +56,31 @@
     tree))
 
 (defn put [tree path k v]
-  (update-in tree
-             (subnode-path path)
-             assoc k v))
-
-(comment :leaf-stuff
-
-         (defn set-leaf
-           ([tree v]
-            (assoc tree :leaf v))
-           ([tree path v]
-            (upd tree path
-                 #(set-leaf % v))))
-
-         (defn put-leaf [tree path v]
-           (-> (ensure-leaf tree path)
-               (set-leaf path v)))
-
-         (defn put-leaves [tree xs]
-           (reduce (fn [t [sym val]]
-                     (put-leaf t (path/path sym) val))
-                   tree (partition 2 xs)))
-
-         (defn upd-leaf
-           ([tree f]
-            (if (contains? tree :leaf)
-              (update tree :leaf f)
-              tree))
-           ([tree path f]
-            (upd tree path
-                 #(upd-leaf % f))))
-
-         (defn upd-node
-           [tree f]
-           (reduce #(-> (cd % [%2]) f parent)
-                   tree (keys (:node tree))))
-
-         (defn upd-leaves
-           [tree f]
-           (-> (upd-leaf tree f)
-               (upd-node #(upd-leaves % f)))))
+  (if (seq path)
+    (update-in tree
+              (subnode-path path)
+              assoc k v)
+    (assoc tree k v)))
 
 (defmacro at [tree path & ops]
   `(upd ~tree ~path
         (fn [t#] (-> t# ~@ops))))
+
+(do :show
+
+    (defn- remove-parents
+      [tree]
+      (-> (dissoc tree :parent :name)
+          (update :node u/$vals remove-parents)))
+
+    (defn show
+      [tree]
+      (-> (remove-parents tree)
+          (assoc :at (position tree))))
+
+    (defn ppr [tree] (u/ppr (show tree))))
+
+
+(comment :tries
+
+         ())

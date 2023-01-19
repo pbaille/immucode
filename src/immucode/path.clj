@@ -5,10 +5,15 @@
   ([x]
    (cond
      (ident? x) (u/named->path x)
+     (number? x) [x]
      (vector? x) (vec (mapcat path x))))
   ([x & xs]
    (path (into [x] xs))))
 
+(defn path-segment? [x]
+  (or (ident? x)
+      (number? x)))
+
 (defn path? [x]
   (and (vector? x)
-       (every? symbol? x)))
+       (every? path-segment? x)))

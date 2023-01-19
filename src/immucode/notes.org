@@ -3,3 +3,11 @@
 
 <2023-01-17 Tue>
 I would like the whole coding environment to be immutable
+
+<2023-01-19 Thu>
+when adding something to the environment it is immediately compiled, self sufficiant and immutable, no references to outter env
+if doing so we will have code duplications when combining existing code fragments
+the best thing would be to strip the creation env to its bare minimum and copy it
+or to compile to a serie of bindings and a return expression
+when combining two forms we could therefore merge their bindings so there is no duplications
+should we use hashes ?

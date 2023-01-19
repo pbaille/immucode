@@ -107,15 +107,18 @@
       ([env expr]
        (cp expr
            symbol? (if-let [found (tree/find env (path/path expr))]
-                     (assoc env :link found)
+                     (-> (assoc env :link found)
+                         (update :layer (fnil inc (:layer found 0))))
                      (if-let [resolved (resolve expr)]
                        (assoc env :value (deref resolved))
                        (u/throw [:unresolvable expr :in env])))
 
-           seq? (let [[verb & args] (mapv (partial bind env) expr)]
-                  (assoc env
-                         :expression
-                         {:verb verb :args args}))
+           seq? (let [env (reduce  (fn [env [idx subexpr]]
+                                     (bind env idx subexpr))
+                                   (assoc env :expression expr)
+                                   (map-indexed vector expr))
+                      max-layer (apply max (keep :layer (vals (:node env))))]
+                  (assoc env :layer (inc max-layer)))
 
            (assoc env :value expr)))
 

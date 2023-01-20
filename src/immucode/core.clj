@@ -81,130 +81,117 @@
 
     (do :help
 
-        (defn add-deps [env x]
-          (cp x
-              nil? env
-              path/path? (update env :deps (fnil conj #{}) x)
-              set? (update env :deps (fnil into #{}) x)
-              (u/throw [:add-deps/bad-input x])))
-
-        (defn deps-seq [env]
-          (if-let [deps (seq (:deps env))]
-            (concat (mapcat (fn [at] (deps-seq (tree/find env at))) deps) deps)
-            []))
-
-        (deps-seq (tree/cd E1 ['ret]))
+        (defn append1 [l x]
+          (concat l (list x)))
 
         (defn path->var-sym [p]
           (symbol (str/join "_" p)))
 
         (defn var->qualified-symbol [v]
           (let [{:keys [ns name]} (meta v)]
-            (symbol (str ns) (str name)))))
+            (symbol (str ns) (str name))))
+
+        (defn env->var-sym [env]
+          (path->var-sym (tree/position env)))
+
+        (defn cd [env sym]
+          (tree/cd env (path/path sym)))
+
+        (defn env-get [env at]
+          (tree/cd (tree/root env) (path/path at)))
+
+        (defn expression-subenvs [env]
+          (assert (:expression env))
+          (map (fn [idx] (tree/cd env [idx]))
+               (range (count (:expression env)))))
+
+        (defn compile1
+          [{:as env :keys [link expression value var]}]
+          (cond
+            var (var->qualified-symbol var)
+            value value
+            link (path->var-sym link)
+            expression (map compile1 (expression-subenvs env)))))
 
     (defn bind
 
       ([env expr]
        (cp expr
            symbol? (if-let [found (tree/find env (path/path expr))]
-                     (-> (assoc env :link found)
-                         (update :layer (fnil inc (:layer found 0))))
+                     (assoc env :link (tree/position found))
                      (if-let [resolved (resolve expr)]
-                       (assoc env :value (deref resolved))
+                       (assoc env :var resolved)
                        (u/throw [:unresolvable expr :in env])))
 
-           seq? (let [env (reduce  (fn [env [idx subexpr]]
-                                     (bind env idx subexpr))
-                                   (assoc env :expression expr)
-                                   (map-indexed vector expr))
-                      max-layer (apply max (keep :layer (vals (:node env))))]
-                  (assoc env :layer (inc max-layer)))
+           seq? (reduce  (fn [env [idx subexpr]]
+                           (bind env idx subexpr))
+                         (assoc env :expression expr)
+                         (map-indexed vector expr))
 
            (assoc env :value expr)))
 
       ([env sym expr]
        (let [path (path/path sym)]
-         (tree/upd (tree/ensure-path env path)
-                   path
-                   #(bind % expr)))))
+         (if (tree/cd env path)
+           (u/throw "already defined path " sym env)
+           (tree/upd (tree/ensure-path env path)
+                     path
+                     #(bind % expr))))))
+
+    (do :bind
+        (def E1
+          (-> ENV0
+              (bind 'x 1)
+              (bind 'x-link 'x)
+              (bind 'y 2)
+              (bind 'a 34)
+              (bind 'z '(+ x y))
+              (bind 'ret '(+ z z)))))
 
     (defn evaluate
-      ([{:as env :keys [link expression code value]}]
+      ([{:as env :keys [link expression value var]}]
        (cond
+         var (deref var)
          value value
-         link (evaluate link)
+         link (evaluate (tree/at env link))
          expression (let [[verb & args]
-                          (map (comp evaluate val)
-                               (sort (:node env)))]
+                          (map evaluate
+                               (expression-subenvs env))]
                       (apply verb args))))
       ([env at]
        (evaluate (cd env at))))
 
+    (do :evaluate
+        E1
+        (cd E1 '[z 1])
+        (evaluate E1 'x)
+        (evaluate E1 'x-link)
+        (evaluate E1 'z)
+        (evaluate E1 'ret))
+
     (defn deps
-      [{:as env :keys [link expression code value]}]
-      (let [path (tree/position env)]
-        (cond
-          value (list path)
-          link (concat (deps link) (list path))
-          expression (reduce
-                      (fn [ds subenv]
-                        (concat (remove (set ds) (deps subenv)) ds))
-                      (list path) (vals (:node env))))))
-
-    (comment (deps (cd E1 'z)))
-
-    #_(defn compile
-      [{:as env :keys [link expression code value]}]
-      (let [path (tree/position env)]
-        (cond
-          value (list path)
-          link (concat (compile link) (list path))
-          expression (reduce
-                      (fn [ds subenv]
-                        (concat (remove (set ds) (compile subenv)) ds))
-                      (list expression) (vals (:node env))))))
-
-    #_(defn compile
-      [{:as env :keys [link expression code value]}]
+      [{:as env :keys [link expression]}]
       (cond
-        value value
-        link (compile link)
-        expression (map (comp compile val)
-                        (sort (:node env)))))
+        link (append1 (deps (tree/at env link)) link)
+        expression (reduce
+                    (fn [ds subenv]
+                      (concat (remove (set ds) (deps subenv)) ds))
+                    () (expression-subenvs env))))
+
+    (do :deps
+        (deps (cd E1 'ret)))
+
+    (defn compile [env at]
+      (let [bindings (->> (deps (cd env at))
+                          (map (partial tree/at env))
+                          (map (fn [env] (list 'def (path->var-sym (tree/position env)) (compile1 env))))
+                          (cons 'do))]
+        (append1 bindings
+                 (compile1 (cd env at)))))
+
+    (do :compile
+        (compile E1 'ret))
 
 
-
-    (comment :assertions
-             (bind ENV0 3)
-             (bind ENV0 '(+ 1 2 (- 3 4)))
-
-             (-> ENV0
-                 (bind 'x 1)
-                 (bind 'y 'x)
-                 (bind 'z '(+ x y))
-                 (cd 'z)
-                 deps)
-
-             (def E1
-               (-> ENV0
-                   (bind 'x 1)
-                   (bind 'y 2)
-                   (bind 'a 34)
-                   (bind 'z '(+ x y))
-                   (bind 'ret '(+ z z))
-                   #_(get-in [:node 'ret :layer])))
-
-             (evaluate E1 'ret)
-             #_ (assert (= 6 (evaluate E1 'ret)))
-
-             (deps (cd E1 'ret))
-
-             (compile (cd E1 'ret))
-             #_(assert
-                (do (eval (compile (cd E1 'ret)))
-                    (= ret 6))))
-
-    (defn env->var-sym [env]
-      (path->var-sym (tree/position env)))
 
     )

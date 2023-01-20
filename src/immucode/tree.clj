@@ -27,6 +27,9 @@
     (root parent)
     tree))
 
+(defn at [tree path]
+  (cd (root tree) path))
+
 (defn find
   [tree path]
   (when tree
@@ -61,10 +64,6 @@
               (subnode-path path)
               assoc k v)
     (assoc tree k v)))
-
-(defmacro at [tree path & ops]
-  `(upd ~tree ~path
-        (fn [t#] (-> t# ~@ops))))
 
 (do :show
 

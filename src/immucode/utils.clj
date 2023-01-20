@@ -52,8 +52,8 @@
 (defn ppx [x]
   (ppr (macroexpand-1 x)))
 
-(defn throw [x]
-  (throw (Exception. (pretty-str x))))
+(defn throw [& xs]
+  (throw (Exception. (apply pretty-str xs))))
 
 (defmacro is [& xs]
   `(or (= ~@xs)
@@ -76,4 +76,4 @@
   (last xs))
 
 (defmacro type-case [x & xs]
-  `(case (simple-type x) ~@xs))
+  `(case (simple-type ~x) ~@xs))

@@ -27,6 +27,9 @@
     (root parent)
     tree))
 
+(defn root? [tree]
+  (not (parent tree)))
+
 (defn at [tree path]
   (cd (root tree) path))
 
@@ -58,12 +61,15 @@
                (fn [x] (or x {})))
     tree))
 
-(defn put [tree path k v]
-  (if (seq path)
-    (update-in tree
-              (subnode-path path)
-              assoc k v)
-    (assoc tree k v)))
+(defn put
+  ([tree path k v]
+   (if (seq path)
+     (update-in tree
+                (subnode-path path)
+                assoc k v)
+     (assoc tree k v)))
+  ([tree path m]
+   (reduce (fn [e [k v]] (put e path k v)) tree m)))
 
 (do :show
 

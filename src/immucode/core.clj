@@ -249,69 +249,6 @@
         ((evaluate ENV0 '(fn [a] a))
          1))
 
-    (defn deps
-      [{:as env :keys [lambda link expression]}]
-      (cond
-        link (append1 (deps (tree/at env link)) link)
-        lambda (deps (tree/at env (:return env)))
-        expression (reduce
-                    (fn [ds subenv]
-                      (let [ds+ (deps subenv)]
-                        (concat ds+ (remove (set ds+) ds))))
-                    () (expression-subenvs env))))
-
-    (do :deps
-        (deps (cd E1 'ret))
-        (deps (cd E1 'ret2)))
-
-    (comment :useless?
-
-             (defn remove-duplicates [xs]
-               (loop [seen #{} todo xs ret []]
-                 (if-let [[x & xs] (seq todo)]
-                   (if (seen x)
-                     (recur seen xs ret)
-                     (recur (conj seen x) xs (conj ret x)))
-                   (seq ret))))
-
-             (defn undup-stack-conj [q x]
-               (cons x (remove (partial = x) q)))
-
-             (defn exploration
-               [seen {:as env :keys [local value link expression]}]
-               (cond local seen
-                     value seen
-                     link (exploration (undup-stack-conj seen link) (tree/at env link))
-                     expression (expression-subenvs env))))
-
-    (do :compile-old
-
-        (defn compile1
-          [{:as env :keys [lambda local link expression value var]}]
-          (or value
-              local
-              (cond
-                var (var->qualified-symbol var)
-                link (path->var-sym link)
-                lambda `(fn ~(:argv env) ~(compile1 (tree/at env (:return env))))
-                expression (map compile1 (expression-subenvs env)))))
-
-        (defn compile
-          ([env {:keys [bind-return-compiler]}]
-           (bind-return-compiler
-            (->> (deps env)
-                 (map (partial tree/at env))
-                 (map (juxt env->var-sym compile1)))
-            (compile1 env)))
-          ([env]
-           (compile env {:bind-return-compiler
-                         (fn [bindings return]
-                           `(let ~(vec (mapcat identity bindings)) ~return))})))
-
-        (do :compile
-            (compile (cd E1 'ret))
-            (eval (compile (cd E1 'ret2)))))
-
     (def DEFAULT_COMPILER_OPTS
       {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
        :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
@@ -319,15 +256,15 @@
        :external-symbol-compiler var->qualified-symbol
        :binding-symbol-compiler path->var-sym})
 
-    (defn deps2
+    (defn deps
       [{:as env :keys [link expression lambda]}]
       (cond
-        link (append1 (deps2 (tree/at env link)) link)
+        link (append1 (deps (tree/at env link)) link)
         lambda (remove (partial path/parent-of (tree/position env))
-                       (deps2 (tree/at env (:return env))))
+                       (deps (tree/at env (:return env))))
         expression (reduce
                     (fn [ds subenv]
-                      (let [ds+ (deps2 subenv)]
+                      (let [ds+ (deps subenv)]
                         (concat ds+ (remove (set ds+) ds))))
                     () (expression-subenvs env))))
 
@@ -337,7 +274,7 @@
         :keys [global-bind-return local-bind-return
                external-symbol-compiler binding-symbol-compiler
                lambda-compiler captures]}]
-      (let [deps (deps2 env)
+      (let [deps (deps env)
             deps (if captures (remove (set captures) deps) deps)]
         (letfn [(build1 [{:as env
                           :keys [local var value link lambda expression]}]
@@ -360,18 +297,19 @@
               (global-bind-return bindings (build1 env))
               (local-bind-return bindings (build1 env)))))))
 
-    (build (cd E1 'ret)
-           DEFAULT_COMPILER_OPTS)
+    (do :build
+        (build (cd E1 'ret)
+               DEFAULT_COMPILER_OPTS)
 
-    (eval (build (cd E1 'ret2)
-            DEFAULT_COMPILER_OPTS))
+        (eval (build (cd E1 'ret2)
+                     DEFAULT_COMPILER_OPTS))
 
-    (-> ENV0
-        (bind 'y 23)
-        (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
-        (bind 'ret '(f 1))
-        (cd 'ret)
-        (build DEFAULT_COMPILER_OPTS))
+        (-> ENV0
+            (bind 'y 23)
+            (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
+            (bind 'ret '(f 1))
+            (cd 'ret)
+            (build DEFAULT_COMPILER_OPTS)))
 
     (defmacro progn [& xs]
       (let [[head return] (if (odd? (count xs)) [(butlast xs) (last xs)] [xs nil])
@@ -387,11 +325,13 @@
                    return-sym)
                DEFAULT_COMPILER_OPTS)))
 
-    (progn x 1 y 2 (+ x y))
+    (do :progn
 
-    (progn x 1
-           f (fn [a b] (let [y 4] (+ x y a b)))
-           (f 4 5))
+        (progn x 1 y 2 (+ x y))
+
+        (progn x 1
+               f (fn [a b] (let [y 4] (+ x y a b)))
+               (f 4 5)))
 
 
 

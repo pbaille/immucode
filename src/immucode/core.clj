@@ -191,15 +191,14 @@
                             (let [retsym (gensym "ret_")
                                   return-path (conj (tree/position env) retsym)
                                   form (list 'fn argv return)]
-                              (bind (reduce (fn [e a]
-                                              (tree/put e [a] :local a))
-                                            (assoc env
-                                                   :lambda form
-                                                   :argv argv
-                                                   :return return-path)
-                                            argv)
-                                    retsym
-                                    return)))})
+                              (-> (reduce (fn [e a]
+                                            (tree/put e [a] :local a))
+                                          (assoc env
+                                                 :lambda form
+                                                 :argv argv
+                                                 :return return-path)
+                                          argv)
+                                  (bind retsym return))))})
           ;; let
           (tree/put '[let] {:evaluate
                             (fn [env [bindings return]]
@@ -217,22 +216,17 @@
                                     return))})))
 
     (do :bind
-        (-> ENV0
-            (bind 'fun '(fn [a] a))
-            (bind 'ret '(fun 1 2))
-            (cd 'ret)
-            (compile))
 
         (-> ENV0
             (bind 'ret '(let [a 1 b 2] (+ a b)))
             (cd 'ret)
-            (compile))
+            #_(compile)
+            )
 
         (-> ENV0
             (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
             (bind 'ret '(f 1))
-            (cd 'ret)
-            (compile))
+            (cd 'ret))
 
         (def E1
           (-> ENV0
@@ -290,31 +284,116 @@
                      link (exploration (undup-stack-conj seen link) (tree/at env link))
                      expression (expression-subenvs env))))
 
-    (defn compile1
-      [{:as env :keys [lambda local link expression value var]}]
-      (or value
-          local
-          (cond
-            var (var->qualified-symbol var)
-            link (path->var-sym link)
-            lambda `(fn ~(:argv env) ~(compile1 (tree/at env (:return env))))
-            expression (map compile1 (expression-subenvs env)))))
+    (do :compile-old
 
-    (defn compile
-      ([env {:keys [bind-return-compiler]}]
-       (bind-return-compiler
-        (->> (deps env)
-             (map (partial tree/at env))
-             (map (juxt env->var-sym compile1)))
-        (compile1 env)))
-      ([env]
-       (compile env {:bind-return-compiler
-                     (fn [bindings return]
-                       `(let ~(vec (mapcat identity bindings)) ~return))})))
+        (defn compile1
+          [{:as env :keys [lambda local link expression value var]}]
+          (or value
+              local
+              (cond
+                var (var->qualified-symbol var)
+                link (path->var-sym link)
+                lambda `(fn ~(:argv env) ~(compile1 (tree/at env (:return env))))
+                expression (map compile1 (expression-subenvs env)))))
 
-    (do :compile
-        (compile (cd E1 'ret))
-        (eval (compile (cd E1 'ret2))))
+        (defn compile
+          ([env {:keys [bind-return-compiler]}]
+           (bind-return-compiler
+            (->> (deps env)
+                 (map (partial tree/at env))
+                 (map (juxt env->var-sym compile1)))
+            (compile1 env)))
+          ([env]
+           (compile env {:bind-return-compiler
+                         (fn [bindings return]
+                           `(let ~(vec (mapcat identity bindings)) ~return))})))
+
+        (do :compile
+            (compile (cd E1 'ret))
+            (eval (compile (cd E1 'ret2)))))
+
+    (def DEFAULT_COMPILER_OPTS
+      {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
+       :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
+       :lambda-compiler (fn [argv return] `(fn ~argv ~return))
+       :external-symbol-compiler var->qualified-symbol
+       :binding-symbol-compiler path->var-sym})
+
+    (defn deps2
+      [{:as env :keys [link expression lambda]}]
+      (cond
+        link (append1 (deps2 (tree/at env link)) link)
+        lambda (remove (partial path/parent-of (tree/position env))
+                       (deps2 (tree/at env (:return env))))
+        expression (reduce
+                    (fn [ds subenv]
+                      (let [ds+ (deps2 subenv)]
+                        (concat ds+ (remove (set ds+) ds))))
+                    () (expression-subenvs env))))
+
+    (defn build
+      [env
+       {:as options
+        :keys [global-bind-return local-bind-return
+               external-symbol-compiler binding-symbol-compiler
+               lambda-compiler captures]}]
+      (let [deps (deps2 env)
+            deps (if captures (remove (set captures) deps) deps)]
+        (letfn [(build1 [{:as env
+                          :keys [local var value link lambda expression]}]
+                  (cond
+                    local local
+                    value value
+                    var (external-symbol-compiler var)
+                    link (binding-symbol-compiler link)
+                    expression (map build1 (expression-subenvs env))
+                    lambda (lambda-compiler (:argv env)
+                                            (build (tree/at env (:return env))
+                                                   (assoc options
+                                                          :captures deps
+                                                          :binding-symbol-compiler
+                                                          (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p))))))))]
+          (let [bindings
+                (map (juxt binding-symbol-compiler (comp build1 (partial tree/at env)))
+                     deps)]
+            (if (tree/root? env)
+              (global-bind-return bindings (build1 env))
+              (local-bind-return bindings (build1 env)))))))
+
+    (build (cd E1 'ret)
+           DEFAULT_COMPILER_OPTS)
+
+    (eval (build (cd E1 'ret2)
+            DEFAULT_COMPILER_OPTS))
+
+    (-> ENV0
+        (bind 'y 23)
+        (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
+        (bind 'ret '(f 1))
+        (cd 'ret)
+        (build DEFAULT_COMPILER_OPTS))
+
+    (defmacro progn [& xs]
+      (let [[head return] (if (odd? (count xs)) [(butlast xs) (last xs)] [xs nil])
+            return-binding (if return [(gensym "ret_") return])
+            base-bindings (vec (partition 2 head))
+            bindings (if return (conj base-bindings return-binding) base-bindings)
+            return-sym (first (last bindings))]
+        (println bindings)
+        (build (cd (reduce (fn [e [b v]]
+                             (bind e b v))
+                           ENV0
+                           bindings)
+                   return-sym)
+               DEFAULT_COMPILER_OPTS)))
+
+    (progn x 1 y 2 (+ x y))
+
+    (progn x 1
+           f (fn [a b] (let [y 4] (+ x y a b)))
+           (f 4 5))
+
+
 
 
 

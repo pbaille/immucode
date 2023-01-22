@@ -306,17 +306,25 @@
 
     (do :progn
 
+        :simple
+
         (progn x 1 y 2 (+ x y))
 
         (progn x 1
                f (fn [a b] (let [y 4] (+ x y a b)))
                (f 4 5))
 
+        :lambda
+
         (progn ((fn [a b] (+ a b)) 1 2))
+
+        :nested-bindings
 
         (progn x 1
                y (let [z 3] (+ x z))
                (+ y.z x y))
+
+        :mac
 
         (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
                (infix 1 + 2))
@@ -326,14 +334,20 @@
 
         (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
+        :quote
+
         (progn 'io)
+
+        :if
+
         (progn (if true :ok :ko))
         (progn (if (= 1 ((fn [a] a) 2))
                  (let [x 1 y 2] (+ x y))
                  'ko))
 
-        (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
+        :recursion
 
+        (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
         (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
                (f 10))
 

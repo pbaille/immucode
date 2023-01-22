@@ -29,10 +29,13 @@
     (defn env-get [env at]
       (tree/cd (tree/root env) (path/path at)))
 
-    (defn expression-subenvs [env]
-      (assert (:expression env))
+    (defn expression-subenvs
+      [{:as env :keys [expression branch]}]
+      (assert (or expression branch))
       (map (fn [idx] (tree/cd env [idx]))
-           (range (count (:expression env)))))
+           (range (if expression
+                    (count expression)
+                    3))))
 
     (defn resolve-key [env k]
       (if env
@@ -111,89 +114,120 @@
 
   (-> {}
       ;; lambda
-      (tree/put '[fn] {:evaluate
-                      (fn [env [argv return]]
-                        (fn [& xs]
-                          (-> (reduce (fn [e [argsym argval]]
-                                        (tree/put e [argsym] :value argval))
-                                      env (zipmap argv xs))
-                              (evaluate return))))
+      (tree/put '[fn]
+                {:evaluate
+                 (fn [env [argv return]]
+                   (fn [& xs]
+                     (-> (reduce (fn [e [argsym argval]]
+                                   (tree/put e [argsym] :value argval))
+                                 env (zipmap argv xs))
+                         (evaluate return))))
 
-                      :bind
-                      (fn [env [argv return]]
-                        (let [retsym (gensym "ret_")
-                              return-path (conj (tree/position env) retsym)
-                              form (list 'fn argv return)]
-                          (-> (reduce (fn [e a]
-                                        (tree/put e [a] :local a))
-                                      (assoc env
-                                             :lambda form
-                                             :argv argv
-                                             :return return-path)
-                                      argv)
-                              (bind retsym return))))})
+                 :bind
+                 (fn [env [argv return]]
+                   (let [retsym (gensym "ret_")
+                         position (tree/position env)
+                         name (last position)
+                         return-path (conj position retsym)
+                         form (list 'fn argv return)
+                         initial
+                         (-> (tree/put env [name] {:local name})
+                             (assoc :lambda form
+                                    :name name
+                                    :argv argv
+                                    :return return-path))]
+                     (-> (reduce (fn [e a]
+                                   (tree/put e [a] :local a))
+                                 initial
+                                 argv)
+                         (bind retsym return))))})
       ;; let
-      (tree/put '[let] {:evaluate
-                        (fn [env [bindings return]]
-                          (let [env+ (reduce (fn [e [argsym argval]]
-                                               (tree/put e [argsym] :value (evaluate e argval)))
-                                             env (partition 2 bindings))]
-                            (evaluate env+ return)))
+      (tree/put '[let]
+                {:evaluate
+                 (fn [env [bindings return]]
+                   (let [env+ (reduce (fn [e [argsym argval]]
+                                        (tree/put e [argsym] :value (evaluate e argval)))
+                                      env (partition 2 bindings))]
+                     (evaluate env+ return)))
 
-                        :bind
-                        (fn [env [bindings return]]
-                          (bind (reduce (fn [e [sym expr]]
-                                          (bind e sym expr))
-                                        (assoc env :form (list 'let bindings return))
-                                        (partition 2 bindings))
-                                return))})
+                 :bind
+                 (fn [env [bindings return]]
+                   (bind (reduce (fn [e [sym expr]]
+                                   (bind e sym expr))
+                                 (assoc env :form (list 'let bindings return))
+                                 (partition 2 bindings))
+                         return))})
 
-      (tree/put '[mac] {:bind (fn [env [argv return]]
-                                (let [expand (evaluate env (list 'fn argv return))]
-                                  (assoc env
-                                         :evaluate
-                                         (fn [env args]
-                                           (evaluate env (expand env args)))
-                                         :bind
-                                         (fn [env args]
-                                           (bind env (expand env args))))))})))
+      ;; mac
+      (tree/put '[mac]
+                {:bind (fn [env [argv return]]
+                         (let [expand (evaluate env (list 'fn argv return))]
+                           (assoc env
+                                  :evaluate
+                                  (fn [env args]
+                                    (evaluate env (expand env args)))
+                                  :bind
+                                  (fn [env args]
+                                    (bind env (expand env args))))))})
+
+      ;; quote
+      (tree/put '[quote]
+                {:evaluate (fn [_ [x]] (list 'quote x))
+                 :bind (fn [env [x]] (assoc env :value (list 'quote x)))})
+
+      (tree/put '[if]
+                {:evaluate (fn [env [test then else]]
+                             (if (evaluate env test)
+                               (evaluate env then)
+                               (evaluate env else)))
+                 :bind (fn [env [test then else]]
+                         (-> (assoc env :branch (list 'if test then else))
+                             (bind [0] test)
+                             (bind [1] then)
+                             (bind [2] else)))})))
 
 (def DEFAULT_COMPILER_OPTS
   {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
    :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
-   :lambda-compiler (fn [argv return] `(fn ~argv ~return))
+   :lambda-compiler (fn [name argv return] `(fn ~@(if (symbol? name) [name]) ~argv ~return))
+   :branch-compiler (fn [test then else] (list 'if test then else))
+   :application-compiler (fn [& xs] (list* xs))
    :external-symbol-compiler var->qualified-symbol
    :binding-symbol-compiler path->var-sym})
 
 (defn deps
-  [{:as env :keys [link expression lambda]}]
+  [{:as env :keys [link expression lambda branch]}]
   (cond
     link (append1 (deps (tree/at env link)) link)
     lambda (remove (partial path/parent-of (tree/position env))
                    (deps (tree/at env (:return env))))
-    expression (reduce
-                (fn [ds subenv]
-                  (let [ds+ (deps subenv)]
-                    (concat ds+ (remove (set ds+) ds))))
-                () (expression-subenvs env))))
+    (or expression branch)
+    (reduce
+     (fn [ds subenv]
+       (let [ds+ (deps subenv)]
+         (concat ds+ (remove (set ds+) ds))))
+     () (expression-subenvs env))))
 
 (defn build
   [env
    {:as options
     :keys [global-bind-return local-bind-return
            external-symbol-compiler binding-symbol-compiler
-           lambda-compiler captures]}]
+           application-compiler lambda-compiler branch-compiler
+           captures]}]
   (let [deps (deps env)
         deps (if captures (remove (set captures) deps) deps)]
     (letfn [(build1 [{:as env
-                      :keys [local var value link lambda expression]}]
+                      :keys [local var value link lambda branch expression]}]
               (cond
                 local local
                 value value
                 var (external-symbol-compiler var)
                 link (binding-symbol-compiler link)
-                expression (map build1 (expression-subenvs env))
-                lambda (lambda-compiler (:argv env)
+                expression (apply application-compiler (map build1 (expression-subenvs env)))
+                branch (apply branch-compiler (map build1 (expression-subenvs env)))
+                lambda (lambda-compiler (:name env)
+                                        (:argv env)
                                         (build (tree/at env (:return env))
                                                (assoc options
                                                       :captures deps
@@ -221,73 +255,87 @@
 
 (do :tries
 
-         (do :evaluate
-             E1
-             (cd E1 '[z 1])
-             (evaluate E1 'x)
-             (evaluate E1 'x-link)
-             (evaluate E1 'z)
-             (evaluate E1 'ret)
-             ((evaluate ENV0 '(fn [a] a))
-              1)
-             (evaluate ENV0
-                       '((mac [_ args] (list (second args) (first args) (nth args 2)))
-                         1 + 2)))
+    (do :evaluate
+        E1
+        (cd E1 '[z 1])
+        (evaluate E1 'x)
+        (evaluate E1 'x-link)
+        (evaluate E1 'z)
+        (evaluate E1 'ret)
+        ((evaluate ENV0 '(fn [a] a))
+         1)
+        (evaluate ENV0
+                  '((mac [_ args] (list (second args) (first args) (nth args 2)))
+                    1 + 2)))
 
-         (do :bind
+    (do :bind
 
-             (-> ENV0
-                 (bind 'ret '(let [a 1 b 2] (+ a b)))
-                 (cd 'ret))
+        (-> ENV0
+            (bind 'ret '(let [a 1 b 2] (+ a b)))
+            (cd 'ret))
 
-             (-> ENV0
-                 (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
-                 (bind 'ret '(f 1))
-                 (cd 'ret))
+        (-> ENV0
+            (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
+            (bind 'ret '(f 1))
+            (cd 'ret))
 
-             (def E1
-               (-> ENV0
-                   (bind 'x 1)
-                   (bind 'x-link 'x)
-                   (bind 'y 2)
-                   (bind 'a 34)
-                   (bind 'z '(+ x y))
-                   (bind 'ret '(+ z z))
-                   (bind 'fun '(fn [a b c] (+ a b c z)))
-                   (bind 'ret2 '(fun x ret a)))))
+        (def E1
+          (-> ENV0
+              (bind 'x 1)
+              (bind 'x-link 'x)
+              (bind 'y 2)
+              (bind 'a 34)
+              (bind 'z '(+ x y))
+              (bind 'ret '(+ z z))
+              (bind 'fun '(fn [a b c] (+ a b c z)))
+              (bind 'ret2 '(fun x ret a)))))
 
-         (do :build
-             (build (cd E1 'ret)
-                    DEFAULT_COMPILER_OPTS)
+    (do :build
+        (build (cd E1 'ret)
+               DEFAULT_COMPILER_OPTS)
 
-             (eval (build (cd E1 'ret2)
-                          DEFAULT_COMPILER_OPTS))
+        (eval (build (cd E1 'ret2)
+                     DEFAULT_COMPILER_OPTS))
 
-             (-> ENV0
-                 (bind 'y 23)
-                 (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
-                 (bind 'ret '(f 1))
-                 (cd 'ret)
-                 (build DEFAULT_COMPILER_OPTS)))
+        (-> ENV0
+            (bind 'y 23)
+            (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
+            (bind 'ret '(f 1))
+            (cd 'ret)
+            (build DEFAULT_COMPILER_OPTS)))
 
-         (do :progn
+    (do :progn
 
-             (progn x 1 y 2 (+ x y))
+        (progn x 1 y 2 (+ x y))
 
-             (progn x 1
-                    f (fn [a b] (let [y 4] (+ x y a b)))
-                    (f 4 5))
+        (progn x 1
+               f (fn [a b] (let [y 4] (+ x y a b)))
+               (f 4 5))
 
-             (progn ((fn [a b] (+ a b)) 1 2))
+        (progn ((fn [a b] (+ a b)) 1 2))
 
-             (progn x 1
-                    y (let [z 3] (+ x z))
-                    (+ y.z x y))
+        (progn x 1
+               y (let [z 3] (+ x z))
+               (+ y.z x y))
 
-             (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
-                    (infix 1 + 2))
+        (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
+               (infix 1 + 2))
 
-             (progn ((mac [_ args] (list (second args) (first args) (nth args 2)))
-                     1 + 2))
+        (progn ((mac [_ args] (list (second args) (first args) (nth args 2)))
+                1 + 2))
 
-             (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))))
+        (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
+
+        (progn 'io)
+        (progn (if true :ok :ko))
+        (progn (if (= 1 ((fn [a] a) 2))
+                 (let [x 1 y 2] (+ x y))
+                 'ko))
+
+        (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
+
+        (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
+               (f 10))
+
+        ()
+        ))

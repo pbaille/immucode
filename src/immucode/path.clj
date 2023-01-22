@@ -17,3 +17,10 @@
 (defn path? [x]
   (and (vector? x)
        (every? path-segment? x)))
+
+(defn parent-of [p c]
+  (= p (vec (take (count p) c))))
+
+(defn remove-prefix [p pref]
+  (if (parent-of pref p)
+    (vec (drop (count pref) p))))

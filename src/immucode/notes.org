@@ -12,9 +12,14 @@ or to compile to a serie of bindings and a return expression
 when combining two forms we could therefore merge their bindings so there is no duplications
 should we use hashes ?
 
-<2023-01-20 Fri>
+** <2023-01-20 Fri>
 if I do not allow env member overides, I can safely bind to a path and be sure that the value will always be the same
 it seems to work well
 *** todo
 - fn and let
 - recursive fn
+** <2023-01-22 Sun>
+the base is here: let, lambdas, macros, if, recursion
+*** todo
+- modules
+- quasiquote

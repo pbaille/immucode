@@ -37,7 +37,7 @@
         (set? x) (into #{} (map f x x))))
 
 (defn kv-seq [x]
-  (cond (sequential? x) (map vector (range (count x)) x)
+  (cond (sequential? x) (map vector (range) x)
         (map? x) (map identity x)
         (set? x) (map vector x x)))
 
@@ -59,17 +59,20 @@
   `(or (= ~@xs)
        (throw (into [:not-equal] '~xs))))
 
+(defn collection-type [x]
+  (cond (seq? x) :list
+        (map? x) :hash-map
+        (vector? x) :vector
+        (set? x) :hash-set))
+
 (defn simple-type [x]
   (cond (fn? x) :function
-        (coll? x)
-        (cond (seq? x) :list
-              (map? x) :hash-map
-              (vector? x) :vector
-              (set? x) :hash-set)
+        (coll? x) (collection-type x)
         (number? x) :number
         (string? x) :string
         (symbol? x) :symbol
-        (keyword? x) :keyword))
+        (keyword? x) :keyword
+        (boolean? x) :boolean))
 
 (defn prob [& xs]
   (mapv ppr xs)

@@ -2,7 +2,9 @@
   (:require [immucode.path :as path]
             [immucode.tree :as tree]
             [immucode.utils :as u :refer [cp]]
-            [clojure.string :as str]))
+            [immucode.composite-literals :as composite]
+            [clojure.string :as str]
+            ))
 
 (do :help
 
@@ -23,19 +25,19 @@
       (tree/cd env (path/path sym)))
 
     (defn bubfind [env x]
-      (if (symbol? x)
+      (if (and (symbol? x)
+               (not (namespace x)))
         (tree/find env (path/path x))))
 
     (defn env-get [env at]
       (tree/cd (tree/root env) (path/path at)))
 
     (defn expression-subenvs
-      [{:as env :keys [expression branch]}]
-      (assert (or expression branch))
+      [{:as env :keys [indexed]}]
+      (assert indexed
+              (str [::expression-subenvs :not-indexed]))
       (map (fn [idx] (tree/cd env [idx]))
-           (range (if expression
-                    (count expression)
-                    3))))
+           (range indexed)))
 
     (defn resolve-key [env k]
       (if env
@@ -62,10 +64,20 @@
               (f env (rest expr))
               (reduce (fn [env [idx subexpr]]
                         (bind env idx subexpr))
-                      (assoc env :expression expr)
+                      (assoc env
+                             :expression expr
+                             :indexed (count expr))
                       (map-indexed vector expr)))
 
-       (assoc env :value expr)))
+       coll? (cp expr
+                 vector? (bind env (cons 'vector expr))
+                 map? (bind env (cons 'hash-map expr))
+                 set? (bind env (cons 'hash-set expr))
+                 (u/throw [::bind :unsupported-collection expr]))
+
+       (assoc env
+              :value expr
+              :type (u/simple-type expr))))
 
   ([env sym expr]
    (let [path (path/path sym)]
@@ -73,7 +85,16 @@
        (u/throw [::bind "already defined path" sym env])
        (tree/upd (tree/ensure-path env path)
                  path
-                 #(bind % expr))))))
+                 #(bind % expr)))))
+
+  ([env s e & ses]
+   (let [[more-bindings ret] (if (odd? (count ses)) [(butlast ses)(last ses)] [ses nil])
+         bindings (cons [s e] (partition 2 more-bindings))
+         env+ (reduce (fn [env [sym expr]] (bind env sym expr))
+                      env bindings)]
+     (if ret
+       (bind env+ ret)
+       env+))))
 
 (defn evaluate
 
@@ -109,6 +130,63 @@
 
   ([env at expr]
    (evaluate (cd env at) expr)))
+
+(def DEFAULT_COMPILER_OPTS
+  {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
+   :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
+   :lambda-compiler (fn [name argv return] `(fn ~@(if (symbol? name) [name]) ~argv ~return))
+   :branch-compiler (fn [test then else] (list 'if test then else))
+   :application-compiler (fn [& xs] (list* xs))
+   :external-symbol-compiler var->qualified-symbol
+   :binding-symbol-compiler path->var-sym})
+
+(defn deps
+  [{:as env :keys [link lambda indexed]}]
+  (cond
+    link (append1 (deps (tree/at env link)) link)
+    lambda (remove (partial path/parent-of (tree/position env))
+                   (deps (tree/at env (:return env))))
+    indexed
+    (reduce
+     (fn [ds subenv]
+       (let [ds+ (deps subenv)]
+         (concat ds+ (remove (set ds+) ds))))
+     () (expression-subenvs env))))
+
+(defn build
+  [env
+   {:as options
+    :keys [global-bind-return local-bind-return
+           external-symbol-compiler binding-symbol-compiler
+           application-compiler lambda-compiler branch-compiler
+           captures]}]
+  (let [deps (deps env)
+        deps (if captures (remove (set captures) deps) deps)]
+    (letfn [(build1 [{:as env
+                      :keys [local var value link lambda branch expression vector hash-map]}]
+              (cond
+                local local
+                value value
+                var (external-symbol-compiler var)
+                link (binding-symbol-compiler link)
+                expression (apply application-compiler (map build1 (expression-subenvs env)))
+                branch (apply branch-compiler (map build1 (expression-subenvs env)))
+                vector (mapv build1 (expression-subenvs env))
+                hash-map (into {} (map (fn [e] [(build1 (tree/cd e '[0])) (build1 (tree/cd e '[1]))])
+                                       (expression-subenvs env)))
+                lambda (lambda-compiler (:name env)
+                                        (:argv env)
+                                        (build (tree/at env (:return env))
+                                               (assoc options
+                                                      :captures deps
+                                                      :binding-symbol-compiler
+                                                      (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p))))))))]
+      (let [bindings
+            (map (juxt binding-symbol-compiler (comp build1 (partial tree/at env)))
+                 deps)]
+        (if (tree/root? env)
+          (global-bind-return bindings (build1 env))
+          (local-bind-return bindings (build1 env)))))))
 
 (def ENV0
 
@@ -170,75 +248,54 @@
                                   (fn [env args]
                                     (bind env (expand env args))))))})
 
+      (tree/put '[binder]
+                {:bind (fn [env [argv return]]
+                         (assoc env :bind (evaluate env (list 'fn argv return))))})
+
       ;; quote
       (tree/put '[quote]
-                {:evaluate (fn [_ [x]] (list 'quote x))
+                {:evaluate (fn [_ [x]] x)
                  :bind (fn [env [x]] (assoc env :value (list 'quote x)))})
 
+      ;; if
       (tree/put '[if]
                 {:evaluate (fn [env [test then else]]
                              (if (evaluate env test)
                                (evaluate env then)
                                (evaluate env else)))
                  :bind (fn [env [test then else]]
-                         (-> (assoc env :branch (list 'if test then else))
+                         (-> (assoc env
+                                    :branch (list 'if test then else)
+                                    :indexed 3)
                              (bind [0] test)
                              (bind [1] then)
-                             (bind [2] else)))})))
+                             (bind [2] else)))})
 
-(def DEFAULT_COMPILER_OPTS
-  {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
-   :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
-   :lambda-compiler (fn [name argv return] `(fn ~@(if (symbol? name) [name]) ~argv ~return))
-   :branch-compiler (fn [test then else] (list 'if test then else))
-   :application-compiler (fn [& xs] (list* xs))
-   :external-symbol-compiler var->qualified-symbol
-   :binding-symbol-compiler path->var-sym})
+      (tree/put '[vector]
+                {:evaluate (fn [env xs]
+                             (mapv (partial evaluate env) xs))
+                 :bind (fn [env xs]
+                         (if (composite/composed? xs)
+                           (bind env (composite/expand-vec xs))
+                           (reduce (fn this [e [i v]]
+                                     (bind e [i] v))
+                                   (assoc env :vector true :indexed (count xs))
+                                   (map-indexed vector xs))))})
 
-(defn deps
-  [{:as env :keys [link expression lambda branch]}]
-  (cond
-    link (append1 (deps (tree/at env link)) link)
-    lambda (remove (partial path/parent-of (tree/position env))
-                   (deps (tree/at env (:return env))))
-    (or expression branch)
-    (reduce
-     (fn [ds subenv]
-       (let [ds+ (deps subenv)]
-         (concat ds+ (remove (set ds+) ds))))
-     () (expression-subenvs env))))
-
-(defn build
-  [env
-   {:as options
-    :keys [global-bind-return local-bind-return
-           external-symbol-compiler binding-symbol-compiler
-           application-compiler lambda-compiler branch-compiler
-           captures]}]
-  (let [deps (deps env)
-        deps (if captures (remove (set captures) deps) deps)]
-    (letfn [(build1 [{:as env
-                      :keys [local var value link lambda branch expression]}]
-              (cond
-                local local
-                value value
-                var (external-symbol-compiler var)
-                link (binding-symbol-compiler link)
-                expression (apply application-compiler (map build1 (expression-subenvs env)))
-                branch (apply branch-compiler (map build1 (expression-subenvs env)))
-                lambda (lambda-compiler (:name env)
-                                        (:argv env)
-                                        (build (tree/at env (:return env))
-                                               (assoc options
-                                                      :captures deps
-                                                      :binding-symbol-compiler
-                                                      (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p))))))))]
-      (let [bindings
-            (map (juxt binding-symbol-compiler (comp build1 (partial tree/at env)))
-                 deps)]
-        (if (tree/root? env)
-          (global-bind-return bindings (build1 env))
-          (local-bind-return bindings (build1 env)))))))
+      (tree/put '[hash-map]
+                {:evaluate (fn [env xs]
+                            (into {} (map (fn [entry] (mapv (partial evaluate env) entry)) xs)))
+                 :bind (fn [env xs]
+                         (let [hm (into {} xs)]
+                           (if (composite/composed? hm)
+                             (bind env (composite/expand-map hm))
+                             (reduce (fn [e [i [k v]]]
+                                       (tree/upd (tree/ensure-path e [i])
+                                                 [i]
+                                                 #(-> (assoc % :indexed 2 :map-entry true)
+                                                      (bind 0 k) (bind 1 v))))
+                                     (assoc env :hash-map true :indexed (count xs))
+                                     (map-indexed vector xs)))))})))
 
 (defmacro progn [& xs]
   (let [[head return] (if (odd? (count xs)) [(butlast xs) (last xs)] [xs nil])
@@ -254,19 +311,6 @@
            DEFAULT_COMPILER_OPTS)))
 
 (do :tries
-
-    (do :evaluate
-        E1
-        (cd E1 '[z 1])
-        (evaluate E1 'x)
-        (evaluate E1 'x-link)
-        (evaluate E1 'z)
-        (evaluate E1 'ret)
-        ((evaluate ENV0 '(fn [a] a))
-         1)
-        (evaluate ENV0
-                  '((mac [_ args] (list (second args) (first args) (nth args 2)))
-                    1 + 2)))
 
     (do :bind
 
@@ -289,6 +333,19 @@
               (bind 'ret '(+ z z))
               (bind 'fun '(fn [a b c] (+ a b c z)))
               (bind 'ret2 '(fun x ret a)))))
+
+    (do :evaluate
+        E1
+        (cd E1 '[z 1])
+        (evaluate E1 'x)
+        (evaluate E1 'x-link)
+        (evaluate E1 'z)
+        (evaluate E1 'ret)
+        ((evaluate ENV0 '(fn [a] a))
+         1)
+        (evaluate ENV0
+                  '((mac [_ args] (list (second args) (first args) (nth args 2)))
+                    1 + 2)))
 
     (do :build
         (build (cd E1 'ret)
@@ -334,9 +391,32 @@
 
         (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
+        (bind ENV0 'm '(binder [e _] e))
+
+        (progn this-value 4
+               m (binder [e args] (bind
+                                   (bind
+                                    (bind e 'this this-value)
+                                    'return (first args))
+                                   'return))
+               (m (list this)))
+
+        (progn this-value 4
+               m (binder [e args] (bind
+                                   (bind e 'this this-value)
+                                   (first args)))
+               (m (list this)))
+
+        #_(progn m (mac [e args] (build
+                                  (bind (bind e 'this :this)
+                                        (first args))
+                                  DEFAULT_COMPILER_OPTS))
+                 (m this))
+
         :quote
 
         (progn 'io)
+        (progn ((mac [_ args] (list '+ (first args) (second args))) 1 2))
 
         :if
 
@@ -351,5 +431,12 @@
         (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
                (f 10))
 
-        ()
+        :collection
+        (progn x 1 y 2 [x y])
+        (progn x 1 y :foo {y x})
+        (progn xs (range 3)
+               [:op . xs])
+        (progn x 1 y :foo z {y x}
+               {:a 3 . z})
+
         ))

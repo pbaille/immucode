@@ -75,9 +75,11 @@
 
        map? (bind env (cons 'hash-map expr))
 
-       (assoc env
-              :value expr
-              :type (u/simple-type expr))))
+       (let [type (u/simple-type expr)]
+         (assoc env
+                :value expr
+                type true
+                :type type))))
 
   ([env sym expr]
    (let [path (path/path sym)]
@@ -254,6 +256,7 @@
                                   (fn [env args]
                                     (bind env (expand env args))))))})
 
+      ;; binder
       (tree/put '[binder]
                 {:bind (fn [env [argv return]]
                          (assoc env :bind (evaluate env (list 'fn argv return))))})
@@ -270,13 +273,14 @@
                                (evaluate env then)
                                (evaluate env else)))
                  :bind (fn [env [test then else]]
-                         (-> (assoc env
-                                    :branch (list 'if test then else)
-                                    :indexed 3)
-                             (bind [0] test)
-                             (bind [1] then)
-                             (bind [2] else)))})
+                         (bind (assoc env
+                                      :branch (list 'if test then else)
+                                      :indexed 3)
+                               0 test
+                               1 then
+                               2 else))})
 
+      ;; collections
       (tree/put '[vector]
                 {:evaluate (fn [env xs]
                              (mapv (partial evaluate env) xs))
@@ -301,25 +305,58 @@
                          (let [hm (into {} xs)]
                            (if (composite/composed? hm)
                              (bind env (composite/expand-map hm))
-                             (reduce (fn [e [i [k v]]]
-                                       (bind e i (list 'map-entry k v))
-                                       #_(-> (tree/put e [i] {:indexed 2 :map-entry true})
-                                           (tree/upd [i] #(bind % 0 k 1 v))))
+                             (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
                                      (assoc env :hash-map true :indexed (count xs))
-                                     (map-indexed vector xs)))))})))
+                                     (map-indexed vector xs)))))})
 
-(defmacro progn [& xs]
+      ;; multi functions
+      (tree/put '[multi-fn simple]
+                {:evaluate (fn [env [argv & cases]])
+                 :bind (fn [env [argv & cases]]
+                         (let [predicates (take-nth 2 cases)
+                               implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
+                           (reduce (fn [e [idx impl]] (bind e idx impl))
+                                   (assoc env
+                                          :multi-fn true
+                                          :predicates predicates
+                                          :bind (fn [env2 args]
+                                                  (let [returned-env (bind env2 (cons :implementation-placeholder args))
+                                                        subenvs (next (indexed-subenvs returned-env))]
+                                                    (loop [candidates (map-indexed vector predicates)]
+                                                      (if-let [[[idx pred] & cs] (seq candidates)]
+                                                        (if (every? identity (map #(%1 %2) pred subenvs))
+                                                          (assoc-in returned-env [:node 0] {:link (conj (tree/position env) idx)})
+                                                          (recur cs))
+                                                        (u/throw [:multi-fn.simple :no-dispatch args]))))))
+                                   (map-indexed vector implementations))))})))
+
+(defmacro progn
+  [& xs]
   (let [[head return] (if (odd? (count xs)) [(butlast xs) (last xs)] [xs nil])
         return-binding (if return [(gensym "ret_") return])
         base-bindings (vec (partition 2 head))
         bindings (if return (conj base-bindings return-binding) base-bindings)
         return-sym (first (last bindings))]
-    (build (cd (reduce (fn [e [b v]]
-                         (bind e b v))
-                       ENV0
-                       bindings)
-               return-sym)
-           DEFAULT_COMPILER_OPTS)))
+
+    (-> (reduce (fn [e [b v]] (bind e b v))
+                ENV0 bindings)
+        (cd return-sym)
+        (build DEFAULT_COMPILER_OPTS))))
+
+#_(defmacro progn
+  [& xs]
+  (-> (apply bind ENV0 xs)
+      (build DEFAULT_COMPILER_OPTS)))
+
+
+(progn mf (multi-fn.simple [x y]
+                            [:number :number] (+ x y)
+                            [:string :string] (str x y))
+       n (mf 1 2)
+       s (mf "io " "gro.")
+       [n s])
+
+()
 
 (do :tries
 

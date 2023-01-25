@@ -32,7 +32,7 @@
     (defn env-get [env at]
       (tree/cd (tree/root env) (path/path at)))
 
-    (defn expression-subenvs
+    (defn indexed-subenvs
       [{:as env :keys [indexed]}]
       (assert indexed
               (str [::expression-subenvs :not-indexed]))
@@ -62,18 +62,18 @@
        seq? (if-let [f (-> (bind env (first expr))
                            (resolve-key :bind))]
               (f env (rest expr))
-              (reduce (fn [env [idx subexpr]]
-                        (bind env idx subexpr))
-                      (assoc env
-                             :expression expr
-                             :indexed (count expr))
-                      (map-indexed vector expr)))
+              (if (composite/composed? expr)
+                (bind env (composite/expand-seq expr))
+                (reduce (fn [env [idx subexpr]]
+                          (bind env idx subexpr))
+                        (assoc env
+                               :expression expr
+                               :indexed (count expr))
+                        (map-indexed vector expr))))
 
-       coll? (cp expr
-                 vector? (bind env (cons 'vector expr))
-                 map? (bind env (cons 'hash-map expr))
-                 set? (bind env (cons 'hash-set expr))
-                 (u/throw [::bind :unsupported-collection expr]))
+       vector? (bind env (cons 'vector expr))
+
+       map? (bind env (cons 'hash-map expr))
 
        (assoc env
               :value expr
@@ -106,7 +106,7 @@
          link (evaluate (tree/at env link))
          expression (let [[verb & args]
                           (map evaluate
-                               (expression-subenvs env))]
+                               (indexed-subenvs env))]
                       (apply verb args)))))
 
   ([env expr]
@@ -122,9 +122,15 @@
        seq? (if-let [f (-> (bind env (first expr))
                            (resolve-key :evaluate))]
               (f env (rest expr))
-              (let [[verb & args]
-                    (map (partial evaluate env) expr)]
-                (apply verb args)))
+              (if (composite/composed? expr)
+                (evaluate env (composite/expand-seq expr))
+                (let [[verb & args]
+                      (map (partial evaluate env) expr)]
+                  (apply verb args))))
+
+       vector? (evaluate env (cons 'vector expr))
+
+       map? (evaluate env (cons 'hash-map expr))
 
        expr))
 
@@ -151,7 +157,7 @@
      (fn [ds subenv]
        (let [ds+ (deps subenv)]
          (concat ds+ (remove (set ds+) ds))))
-     () (expression-subenvs env))))
+     () (indexed-subenvs env))))
 
 (defn build
   [env
@@ -169,11 +175,11 @@
                 value value
                 var (external-symbol-compiler var)
                 link (binding-symbol-compiler link)
-                expression (apply application-compiler (map build1 (expression-subenvs env)))
-                branch (apply branch-compiler (map build1 (expression-subenvs env)))
-                vector (mapv build1 (expression-subenvs env))
+                expression (apply application-compiler (map build1 (indexed-subenvs env)))
+                branch (apply branch-compiler (map build1 (indexed-subenvs env)))
+                vector (mapv build1 (indexed-subenvs env))
                 hash-map (into {} (map (fn [e] [(build1 (tree/cd e '[0])) (build1 (tree/cd e '[1]))])
-                                       (expression-subenvs env)))
+                                       (indexed-subenvs env)))
                 lambda (lambda-compiler (:name env)
                                         (:argv env)
                                         (build (tree/at env (:return env))
@@ -277,10 +283,16 @@
                  :bind (fn [env xs]
                          (if (composite/composed? xs)
                            (bind env (composite/expand-vec xs))
-                           (reduce (fn this [e [i v]]
-                                     (bind e [i] v))
+                           (reduce (fn [e [i v]] (bind e [i] v))
                                    (assoc env :vector true :indexed (count xs))
                                    (map-indexed vector xs))))})
+
+      (tree/put '[map-entry]
+                {:evaluate (fn [env [k v]]
+                            (u/map-entry (evaluate env k) (evaluate env v)))
+                 :bind (fn [env [k v]]
+                         (bind (assoc env :indexed 2 :map-entry true)
+                               0 k 1 v))})
 
       (tree/put '[hash-map]
                 {:evaluate (fn [env xs]
@@ -290,10 +302,9 @@
                            (if (composite/composed? hm)
                              (bind env (composite/expand-map hm))
                              (reduce (fn [e [i [k v]]]
-                                       (tree/upd (tree/ensure-path e [i])
-                                                 [i]
-                                                 #(-> (assoc % :indexed 2 :map-entry true)
-                                                      (bind 0 k) (bind 1 v))))
+                                       (bind e i (list 'map-entry k v))
+                                       #_(-> (tree/put e [i] {:indexed 2 :map-entry true})
+                                           (tree/upd [i] #(bind % 0 k 1 v))))
                                      (assoc env :hash-map true :indexed (count xs))
                                      (map-indexed vector xs)))))})))
 

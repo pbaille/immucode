@@ -3,6 +3,9 @@
   (:require [clojure.string :as str]
             [clojure.pprint :as pprint]))
 
+(defn map-entry [k v]
+  (clojure.lang.MapEntry. k v))
+
 (defmacro cp [& body]
   `(condp #(%1 %2) ~@body))
 

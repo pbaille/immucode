@@ -3,6 +3,7 @@
             [immucode.tree :as tree]
             [immucode.utils :as u :refer [cp]]
             [immucode.composite-literals :as composite]
+            [immucode.destructure :as destructure]
             [clojure.string :as str]
             ))
 
@@ -199,6 +200,22 @@
 (def ENV0
 
   (-> {}
+      ;; let
+      (tree/put '[let]
+                {:evaluate
+                 (fn [env [bindings return]]
+                   (let [env+ (reduce (fn [e [argsym argval]]
+                                        (tree/put e [argsym] :value (evaluate e argval)))
+                                      env (partition 2 (destructure/bindings bindings {})))]
+                     (evaluate env+ return)))
+
+                 :bind
+                 (fn [env [bindings return]]
+                   (bind (reduce (fn [e [sym expr]]
+                                   (bind e sym expr))
+                                 (assoc env :form (list 'let bindings return))
+                                 (partition 2 (destructure/bindings bindings {})))
+                         return))})
       ;; lambda
       (tree/put '[fn]
                 {:evaluate
@@ -211,38 +228,49 @@
 
                  :bind
                  (fn [env [argv return]]
-                   (let [retsym (gensym "ret_")
+
+                   (let [form (list 'fn argv return)
                          position (tree/position env)
-                         name (last position)
-                         return-path (conj position retsym)
-                         form (list 'fn argv return)
+                         fn-name (last position)
+                         return-symbol '__return__
+                         return-path (conj position return-symbol)
+
+                         arguments
+                         (map-indexed (fn [idx p]
+                                        (if (symbol? p)
+                                          {:symbol p}
+                                          {:symbol (gensym (str "arg" idx))
+                                           :destructure p}))
+                                      argv)
+
+                         argument-symbols
+                         (mapv :symbol arguments)
+
                          initial
-                         (-> (tree/put env [name] {:local name})
-                             (assoc :lambda form
-                                    :name name
-                                    :argv argv
-                                    :return return-path))]
-                     (-> (reduce (fn [e a]
+                         (assoc env
+                                :lambda form
+                                :name fn-name
+                                :argv argument-symbols
+                                :return return-path)
+
+                         with-locals
+                         (reduce (fn [e a]
                                    (tree/put e [a] :local a))
                                  initial
-                                 argv)
-                         (bind retsym return))))})
-      ;; let
-      (tree/put '[let]
-                {:evaluate
-                 (fn [env [bindings return]]
-                   (let [env+ (reduce (fn [e [argsym argval]]
-                                        (tree/put e [argsym] :value (evaluate e argval)))
-                                      env (partition 2 bindings))]
-                     (evaluate env+ return)))
+                                 (cons fn-name argument-symbols))
 
-                 :bind
-                 (fn [env [bindings return]]
-                   (bind (reduce (fn [e [sym expr]]
-                                   (bind e sym expr))
-                                 (assoc env :form (list 'let bindings return))
-                                 (partition 2 bindings))
-                         return))})
+                         destructuration-bindings
+                         (mapcat (juxt :destructure :symbol)
+                                 (filter :destructure arguments))
+
+                         return-expression
+                         (if (seq destructuration-bindings)
+                           (list 'let destructuration-bindings return)
+                           return)]
+
+                     (bind with-locals
+                           return-symbol
+                           return-expression)))})
 
       ;; mac
       (tree/put '[mac]
@@ -325,7 +353,8 @@
                                                     (loop [candidates (map-indexed vector predicates)]
                                                       (if-let [[[idx pred] & cs] (seq candidates)]
                                                         (if (every? identity (map #(%1 %2) pred subenvs))
-                                                          (assoc-in returned-env [:node 0] {:link (conj (tree/position env) idx)})
+                                                          (assoc-in returned-env [:node 0]
+                                                                    {:link (conj (tree/position env) idx)})
                                                           (recur cs))
                                                         (u/throw [:multi-fn.simple :no-dispatch args]))))))
                                    (map-indexed vector implementations))))})))
@@ -347,16 +376,6 @@
   [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
-
-
-(progn mf (multi-fn.simple [x y]
-                            [:number :number] (+ x y)
-                            [:string :string] (str x y))
-       n (mf 1 2)
-       s (mf "io " "gro.")
-       [n s])
-
-()
 
 (do :tries
 
@@ -380,7 +399,9 @@
               (bind 'z '(+ x y))
               (bind 'ret '(+ z z))
               (bind 'fun '(fn [a b c] (+ a b c z)))
-              (bind 'ret2 '(fun x ret a)))))
+              (bind 'ret2 '(fun x ret a))))
+
+        (bind ENV0 'f '(fn [x y] (let [z 5] (- z x y)))))
 
     (do :evaluate
         E1
@@ -411,80 +432,98 @@
 
     (do :progn
 
-        :simple
+        (do :simple
 
-        (progn x 1 y 2 (+ x y))
+            (progn x 1 y 2 (+ x y))
 
-        (progn x 1
-               f (fn [a b] (let [y 4] (+ x y a b)))
-               (f 4 5))
+            (progn x 1
+                   f (fn [a b] (let [y 4] (+ x y a b)))
+                   (f 4 5))
 
-        :lambda
+            (progn x 1 y x (+ y y)))
 
-        (progn ((fn [a b] (+ a b)) 1 2))
+        (do :lambda
 
-        :nested-bindings
+            (progn ((fn [a b] (+ a b)) 1 2)))
 
-        (progn x 1
-               y (let [z 3] (+ x z))
-               (+ y.z x y))
+        (do :nested-bindings
 
-        :mac
+            (progn x 1
+                   y (let [z 3] (+ x z))
+                   (+ y.z x y)))
 
-        (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
-               (infix 1 + 2))
+        (do :mac
 
-        (progn ((mac [_ args] (list (second args) (first args) (nth args 2)))
-                1 + 2))
+            (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
+                   (infix 1 + 2))
 
-        (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
+            (progn ((mac [_ args] (list (second args) (first args) (nth args 2)))
+                    1 + 2))
 
-        (bind ENV0 'm '(binder [e _] e))
+            (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
-        (progn this-value 4
-               m (binder [e args] (bind
-                                   (bind
-                                    (bind e 'this this-value)
-                                    'return (first args))
-                                   'return))
-               (m (list this)))
+            (bind ENV0 'm '(binder [e _] e))
 
-        (progn this-value 4
-               m (binder [e args] (bind
-                                   (bind e 'this this-value)
-                                   (first args)))
-               (m (list this)))
+            (progn this-value 4
+                   m (binder [e args] (bind
+                                       (bind
+                                        (bind e 'this this-value)
+                                        'return (first args))
+                                       'return))
+                   (m (list this)))
 
-        #_(progn m (mac [e args] (build
-                                  (bind (bind e 'this :this)
-                                        (first args))
-                                  DEFAULT_COMPILER_OPTS))
-                 (m this))
+            (progn this-value 4
+                   m (binder [e args] (bind
+                                       (bind e 'this this-value)
+                                       (first args)))
+                   (m (list this)))
 
-        :quote
+            #_ (progn m (mac [e args] (build
+                                       (bind (bind e 'this :this)
+                                             (first args))
+                                       DEFAULT_COMPILER_OPTS))
+                      (m this)))
 
-        (progn 'io)
-        (progn ((mac [_ args] (list '+ (first args) (second args))) 1 2))
+        (do :quote
 
-        :if
+            (progn 'io)
+            (progn ((mac [_ args] (list '+ (first args) (second args))) 1 2)))
 
-        (progn (if true :ok :ko))
-        (progn (if (= 1 ((fn [a] a) 2))
-                 (let [x 1 y 2] (+ x y))
-                 'ko))
+        (do :if
 
-        :recursion
+            (progn (if true :ok :ko))
+            (progn (if (= 1 ((fn [a] a) 2))
+                     (let [x 1 y 2] (+ x y))
+                     'ko)))
 
-        (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
-        (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
-               (f 10))
+        (do :recursion
 
-        :collection
-        (progn x 1 y 2 [x y])
-        (progn x 1 y :foo {y x})
-        (progn xs (range 3)
-               [:op . xs])
-        (progn x 1 y :foo z {y x}
-               {:a 3 . z})
+            (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
+            (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
+                   (f 10)))
 
-        ))
+        (do :collection
+            (progn x 1 y 2 [x y])
+            (progn x 1 y :foo {y x})
+            (progn xs (range 3)
+                   [:op . xs])
+            (progn x 1 y :foo z {y x}
+                   {:a 3 . z}))
+
+        (do :multi-fn
+            (progn mf (multi-fn.simple [x y]
+                                       [:number :number] (+ x y)
+                                       [:string :string] (str x y))
+                   n (mf 1 2)
+                   s (mf "io " "gro.")
+                   [n s]))
+
+        (do :destructure
+            (progn (let [[x . xs] (range 10)]
+                     [x xs]))
+
+            (progn (let [{:a a . m} {:a 1 :b 2 :c 3}]
+                     [a m]))
+
+            (progn f (fn [x [a b c]] (+ x a b c))
+                   (f 1 [2 3 4])))))

@@ -44,9 +44,16 @@
       (if env
         (or (get env k)
             (if-let [link (:link env)]
-              (resolve-key (tree/at env link) k))))))
+              (resolve-key (tree/at env link) k)))))
+
+    (defn pairs&return [xs]
+      (if (odd? (count xs))
+        [(partition 2 (butlast xs)) (last xs)]
+        [(partition 2 xs) nil])))
 
 (defn bind
+
+  "Load some expressions into the given environment"
 
   ([env expr]
 
@@ -90,14 +97,11 @@
                  path
                  #(bind % expr)))))
 
-  ([env s e & ses]
-   (let [[more-bindings ret] (if (odd? (count ses)) [(butlast ses)(last ses)] [ses nil])
-         bindings (cons [s e] (partition 2 more-bindings))
-         env+ (reduce (fn [env [sym expr]] (bind env sym expr))
-                      env bindings)]
-     (if ret
-       (bind env+ ret)
-       env+))))
+  ([env sym expr & more]
+   (let [[bindings return] (pairs&return (list* sym expr more))]
+     (-> (reduce (fn [env [sym expr]] (bind env sym expr))
+                 env bindings)
+         (bind return)))))
 
 (defn evaluate
 
@@ -141,8 +145,8 @@
    (evaluate (cd env at) expr)))
 
 (def DEFAULT_COMPILER_OPTS
-  {:global-bind-return (fn [bindings return] `(do ~(map (fn [sym val] (list 'def sym val)) bindings) ~return))
-   :local-bind-return (fn [bindings return] `(let ~(vec (mapcat identity bindings)) ~return))
+  {:global-bind-return (fn [bindings return] (if (seq bindings) `(do ~@(map (fn [[sym val]] (list 'def sym val)) bindings) ~return) return))
+   :local-bind-return (fn [bindings return] (if (seq bindings) `(let ~(vec (mapcat identity bindings)) ~return) return))
    :lambda-compiler (fn [name argv return] `(fn ~@(if (symbol? name) [name]) ~argv ~return))
    :branch-compiler (fn [test then else] (list 'if test then else))
    :application-compiler (fn [& xs] (list* xs))
@@ -150,11 +154,11 @@
    :binding-symbol-compiler path->var-sym})
 
 (defn deps
-  [{:as env :keys [link lambda indexed]}]
+  [{:as env :keys [link return indexed]}]
   (cond
     link (append1 (deps (tree/at env link)) link)
-    lambda (remove (partial path/parent-of (tree/position env))
-                   (deps (tree/at env (:return env))))
+    return (remove (partial path/parent-of (tree/position env))
+                   (deps (tree/at env return)))
     indexed
     (reduce
      (fn [ds subenv]
@@ -163,36 +167,57 @@
      () (indexed-subenvs env))))
 
 (defn build
+
+  "emit executable code evaluating to the value of the current node of the environment"
+
   [env
    {:as options
     :keys [global-bind-return local-bind-return
            external-symbol-compiler binding-symbol-compiler
            application-compiler lambda-compiler branch-compiler
            captures]}]
-  (let [deps (deps env)
-        deps (if captures (remove (set captures) deps) deps)]
+
+  (let [deps (remove (set captures) (deps env))]
+
     (letfn [(build1 [{:as env
-                      :keys [local var value link lambda branch expression vector hash-map]}]
+                      :keys [local var value link branch expression vector hash-map return]}]
               (cond
-                local local
-                value value
+
+                ;; external var
                 var (external-symbol-compiler var)
+
+                ;; environment path
                 link (binding-symbol-compiler link)
+
+                ;; application
                 expression (apply application-compiler (map build1 (indexed-subenvs env)))
+
+                ;; if
                 branch (apply branch-compiler (map build1 (indexed-subenvs env)))
+
+                ;; collections
                 vector (mapv build1 (indexed-subenvs env))
                 hash-map (into {} (map (fn [e] [(build1 (tree/cd e '[0])) (build1 (tree/cd e '[1]))])
                                        (indexed-subenvs env)))
-                lambda (lambda-compiler (:name env)
-                                        (:argv env)
-                                        (build (tree/at env (:return env))
-                                               (assoc options
-                                                      :captures deps
-                                                      :binding-symbol-compiler
-                                                      (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p))))))))]
+
+                ;; let and lambda
+                return (let [subbuild (build (tree/at env (:return env))
+                                             (assoc options
+                                                    :captures deps
+                                                    :binding-symbol-compiler
+                                                    (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p)))))]
+                         (if (:lambda env)
+                           (lambda-compiler (:name env) (:argv env) subbuild)
+                           subbuild))
+
+                ;; value or locally bound symbol
+                :else (or local value)))]
+
       (let [bindings
-            (map (juxt binding-symbol-compiler (comp build1 (partial tree/at env)))
+            (map (juxt binding-symbol-compiler
+                       (comp build1 (partial tree/at env)))
                  deps)]
+
         (if (tree/root? env)
           (global-bind-return bindings (build1 env))
           (local-bind-return bindings (build1 env)))))))
@@ -211,11 +236,27 @@
 
                  :bind
                  (fn [env [bindings return]]
-                   (bind (reduce (fn [e [sym expr]]
+
+                   (let [return-symbol '__return__
+
+                         return-path
+                         (conj (tree/position env) return-symbol)
+
+                         initial
+                         (assoc env
+                                :form (list 'let bindings return)
+                                :local-scope true
+                                :return return-path)
+
+                         with-bindings
+                         (reduce (fn [e [sym expr]]
                                    (bind e sym expr))
-                                 (assoc env :form (list 'let bindings return))
-                                 (partition 2 (destructure/bindings bindings {})))
-                         return))})
+                                 initial
+                                 (partition 2 (destructure/bindings bindings {})))]
+
+                     (bind with-bindings
+                           return-symbol
+                           return)))})
       ;; lambda
       (tree/put '[fn]
                 {:evaluate
@@ -339,7 +380,8 @@
 
       ;; multi functions
       (tree/put '[multi-fn simple]
-                {:evaluate (fn [env [argv & cases]])
+                {:evaluate (fn [env [argv & cases]]
+                             (u/throw [:multi-fn.simple.evalutate :not-yet-implemented]))
                  :bind (fn [env [argv & cases]]
                          (let [predicates (take-nth 2 cases)
                                implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
@@ -361,25 +403,19 @@
 
 (defmacro progn
   [& xs]
-  (let [[head return] (if (odd? (count xs)) [(butlast xs) (last xs)] [xs nil])
-        return-binding (if return [(gensym "ret_") return])
-        base-bindings (vec (partition 2 head))
-        bindings (if return (conj base-bindings return-binding) base-bindings)
-        return-sym (first (last bindings))]
-
-    (-> (reduce (fn [e [b v]] (bind e b v))
-                ENV0 bindings)
-        (cd return-sym)
-        (build DEFAULT_COMPILER_OPTS))))
-
-#_(defmacro progn
-  [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
 
 (do :tries
 
     (do :bind
+
+        (build (bind ENV0 'x 1 'y 2 '(+ x y))
+               DEFAULT_COMPILER_OPTS)
+
+        (bind ENV0 'f '(fn [a] a))
+
+        (bind ENV0 'ret '(let [a 1] a))
 
         (-> ENV0
             (bind 'ret '(let [a 1 b 2] (+ a b)))
@@ -436,6 +472,12 @@
 
             (progn x 1 y 2 (+ x y))
 
+            (progn (let [x 1 y 2] (+ y x)))
+
+            (progn (let [x 1 y 3]
+                     (let [z 5]
+                       (+ x y z))))
+
             (progn x 1
                    f (fn [a b] (let [y 4] (+ x y a b)))
                    (f 4 5))
@@ -448,7 +490,7 @@
 
         (do :nested-bindings
 
-            (progn x 1
+            #_(progn x 1
                    y (let [z 3] (+ x z))
                    (+ y.z x y)))
 

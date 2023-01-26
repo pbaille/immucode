@@ -229,10 +229,10 @@
       (tree/put '[let]
                 {:evaluate
                  (fn [env [bindings return]]
-                   (let [env+ (reduce (fn [e [argsym argval]]
-                                        (tree/put e [argsym] :value (evaluate e argval)))
-                                      env (partition 2 (destructure/bindings bindings {})))]
-                     (evaluate env+ return)))
+                   (-> (reduce (fn [e [argsym argval]]
+                                 (tree/put e [argsym] :value (evaluate e argval)))
+                               env (partition 2 (destructure/bindings bindings {})))
+                       (evaluate return)))
 
                  :bind
                  (fn [env [bindings return]]
@@ -315,93 +315,115 @@
 
       ;; mac
       (tree/put '[mac]
-                {:bind (fn [env [argv return]]
-                         (let [expand (evaluate env (list 'fn argv return))]
-                           (assoc env
-                                  :evaluate
-                                  (fn [env args]
-                                    (evaluate env (expand env args)))
-                                  :bind
-                                  (fn [env args]
-                                    (bind env (expand env args))))))})
+                {:bind
+                 (fn [env [argv return]]
+                   (let [expand (evaluate env (list 'fn argv return))]
+                     (assoc env
+                            :evaluate
+                            (fn [env args]
+                              (evaluate env (expand env args)))
+                            :bind
+                            (fn [env args]
+                              (bind env (expand env args))))))})
 
       ;; binder
       (tree/put '[binder]
-                {:bind (fn [env [argv return]]
-                         (assoc env :bind (evaluate env (list 'fn argv return))))})
+                {:bind
+                 (fn [env [argv return]]
+                   (assoc env :bind (evaluate env (list 'fn argv return))))})
 
       ;; quote
       (tree/put '[quote]
-                {:evaluate (fn [_ [x]] x)
-                 :bind (fn [env [x]] (assoc env :value (list 'quote x)))})
+                {:evaluate
+                 (fn [_ [x]] x)
+
+                 :bind
+                 (fn [env [x]] (assoc env :value (list 'quote x)))})
 
       ;; if
       (tree/put '[if]
-                {:evaluate (fn [env [test then else]]
-                             (if (evaluate env test)
-                               (evaluate env then)
-                               (evaluate env else)))
-                 :bind (fn [env [test then else]]
-                         (bind (assoc env
-                                      :branch (list 'if test then else)
-                                      :indexed 3)
-                               0 test
-                               1 then
-                               2 else))})
+                {:evaluate
+                 (fn [env [test then else]]
+                   (if (evaluate env test)
+                     (evaluate env then)
+                     (evaluate env else)))
+
+                 :bind
+                 (fn [env [test then else]]
+                   (bind (assoc env
+                                :branch (list 'if test then else)
+                                :indexed 3)
+                         0 test
+                         1 then
+                         2 else))})
 
       ;; collections
       (tree/put '[vector]
-                {:evaluate (fn [env xs]
-                             (mapv (partial evaluate env) xs))
-                 :bind (fn [env xs]
-                         (if (composite/composed? xs)
-                           (bind env (composite/expand-vec xs))
-                           (reduce (fn [e [i v]] (bind e [i] v))
-                                   (assoc env :vector true :indexed (count xs))
-                                   (map-indexed vector xs))))})
+                {:evaluate
+                 (fn [env xs]
+                   (mapv (partial evaluate env) xs))
+
+                 :bind
+                 (fn [env xs]
+                   (if (composite/composed? xs)
+                     (bind env (composite/expand-vec xs))
+                     (reduce (fn [e [i v]] (bind e [i] v))
+                             (assoc env :vector true :indexed (count xs))
+                             (map-indexed vector xs))))})
 
       (tree/put '[map-entry]
-                {:evaluate (fn [env [k v]]
-                            (u/map-entry (evaluate env k) (evaluate env v)))
-                 :bind (fn [env [k v]]
-                         (bind (assoc env :indexed 2 :map-entry true)
-                               0 k 1 v))})
+                {:evaluate
+                 (fn [env [k v]]
+                   (u/map-entry (evaluate env k) (evaluate env v)))
+
+                 :bind
+                 (fn [env [k v]]
+                   (bind (assoc env :indexed 2 :map-entry true)
+                         0 k 1 v))})
 
       (tree/put '[hash-map]
-                {:evaluate (fn [env xs]
-                            (into {} (map (fn [entry] (mapv (partial evaluate env) entry)) xs)))
-                 :bind (fn [env xs]
-                         (let [hm (into {} xs)]
-                           (if (composite/composed? hm)
-                             (bind env (composite/expand-map hm))
-                             (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
-                                     (assoc env :hash-map true :indexed (count xs))
-                                     (map-indexed vector xs)))))})
+                {:evaluate
+                 (fn [env xs]
+                   (into {} (map (fn [entry] (mapv (partial evaluate env) entry)) xs)))
+
+                 :bind
+                 (fn [env xs]
+                   (let [hm (into {} xs)]
+                     (if (composite/composed? hm)
+                       (bind env (composite/expand-map hm))
+                       (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
+                               (assoc env :hash-map true :indexed (count xs))
+                               (map-indexed vector xs)))))})
 
       ;; multi functions
       (tree/put '[multi-fn simple]
-                {:evaluate (fn [env [argv & cases]]
-                             (u/throw [:multi-fn.simple.evalutate :not-yet-implemented]))
-                 :bind (fn [env [argv & cases]]
-                         (let [predicates (take-nth 2 cases)
-                               implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
-                           (reduce (fn [e [idx impl]] (bind e idx impl))
-                                   (assoc env
-                                          :multi-fn true
-                                          :predicates predicates
-                                          :bind (fn [env2 args]
-                                                  (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                        subenvs (next (indexed-subenvs returned-env))]
-                                                    (loop [candidates (map-indexed vector predicates)]
-                                                      (if-let [[[idx pred] & cs] (seq candidates)]
-                                                        (if (every? identity (map #(%1 %2) pred subenvs))
-                                                          (assoc-in returned-env [:node 0]
-                                                                    {:link (conj (tree/position env) idx)})
-                                                          (recur cs))
-                                                        (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                                   (map-indexed vector implementations))))})))
+                {:evaluate
+                 (fn [_ _]
+                   (u/throw [:multi-fn.simple.evalutate :not-yet-implemented]))
+
+                 :bind
+                 (fn [env [argv & cases]]
+                   (let [predicates (take-nth 2 cases)
+                         implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
+                     (reduce (fn [e [idx impl]] (bind e idx impl))
+                             (assoc env
+                                    :multi-fn true
+                                    :predicates predicates
+                                    :bind (fn [env2 args]
+                                            (let [returned-env (bind env2 (cons :implementation-placeholder args))
+                                                  subenvs (next (indexed-subenvs returned-env))]
+                                              (loop [candidates (map-indexed vector predicates)]
+                                                (if-let [[[idx pred] & cs] (seq candidates)]
+                                                  (if (every? identity (map #(%1 %2) pred subenvs))
+                                                    (assoc-in returned-env [:node 0]
+                                                              {:link (conj (tree/position env) idx)})
+                                                    (recur cs))
+                                                  (u/throw [:multi-fn.simple :no-dispatch args]))))))
+                             (map-indexed vector implementations))))})))
 
 (defmacro progn
+  "Takes a flat series of bindings followed or not by a return value.
+   Build the corresponding program using default options."
   [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))

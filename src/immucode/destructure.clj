@@ -103,7 +103,8 @@
     (comment
       (bindings '!a 'x {})
       (parse-symbol '!a)
-      (subs "!a" 1)))
+      (subs "!a" 1)
+      (bindings 'a 'b {})))
 
 (def operators
   {:&

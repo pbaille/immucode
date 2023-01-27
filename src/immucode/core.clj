@@ -4,8 +4,8 @@
             [immucode.utils :as u :refer [cp]]
             [immucode.composite-literals :as composite]
             [immucode.destructure :as destructure]
-            [clojure.string :as str]
-            ))
+            [immucode.quote :as quote]
+            [clojure.string :as str]))
 
 (do :help
 
@@ -399,7 +399,7 @@
       (tree/put '[multi-fn simple]
                 {:evaluate
                  (fn [_ _]
-                   (u/throw [:multi-fn.simple.evalutate :not-yet-implemented]))
+                   (u/throw [:multi-fn.simple.evalutate :not-implemented]))
 
                  :bind
                  (fn [env [argv & cases]]
@@ -419,7 +419,15 @@
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                             (map-indexed vector implementations))))})))
+                             (map-indexed vector implementations))))})
+
+      (tree/put '[qt]
+                {:evaluate
+                 (fn [_ _] (u/throw [:sub.evaluate :not-implemented]))
+
+                 :bind
+                 (fn [env [content]]
+                   (bind env (quote/quote-fn 0 content)))})))
 
 (defmacro progn
   "Takes a flat series of bindings followed or not by a return value.
@@ -427,6 +435,10 @@
   [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
+
+
+
+
 
 (do :tries
 
@@ -513,8 +525,8 @@
         (do :nested-bindings
 
             #_(progn x 1
-                   y (let [z 3] (+ x z))
-                   (+ y.z x y)))
+                     y (let [z 3] (+ x z))
+                     (+ y.z x y)))
 
         (do :mac
 

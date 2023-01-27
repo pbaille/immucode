@@ -19,7 +19,7 @@
   ('#{up-qt upq} (verb x)))
 
 (defn up-quote-unquote? [x]
-  (= (verb x) 'upnq))
+  ('#{upnq up-unq up-unquote} (verb x)))
 
 (defn quote-wrap [x]
   (list 'quote x))
@@ -48,9 +48,9 @@
                    (quote-fn (inc lvl) (second form)))
 
       ;; shortcuts (not mandatory)
-      ;qup
+      ; upq up-qt
       up-quote? (recur (dec lvl) (second form))
-      ;punq
+      ; upnq
       up-quote-unquote? (recur (dec lvl) (list 'unquote (second form)))
 
       ;; collections
@@ -74,5 +74,6 @@
 
   (let [x 1
         l [1 2 3]]
+    (qt (+ (unq x) . (unq l)))
     (composite/expand
-      (qt (+ (unq x) . (unq l))))))
+     (qt (+ (unq x) . (unq l))))))

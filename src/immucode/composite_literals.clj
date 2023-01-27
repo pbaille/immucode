@@ -59,15 +59,19 @@
                 (= 1 (count (filter dot? x)))))))
 
 (defn seq-parts [s]
-  (loop [[fs ss & rs] s ret []]
-    (cp fs
-        not ret
-        dot? (recur rs (conj ret ss))
-        dotdot? (vec (concat (conj ret ss) rs))
-        (recur (cons ss (or rs ()))
-               (if (vector? (last ret))
-                 (conj (vec (butlast ret)) (conj (last ret) fs))
-                 (conj ret [fs]))))))
+  (loop [xs s ret []]
+    (if-let [[fs ss & rs] (seq xs)]
+      (cp fs
+          dot? (if (vector? ss)
+                 ;; a dot is followed by a literal vector (for some reasons...)
+                 (recur (concat ss rs) ret)
+                 (recur rs (conj ret ss)))
+          dotdot? (vec (concat (conj ret ss) rs))
+          (recur (and (next xs) (cons ss rs))
+                 (if (vector? (last ret))
+                   (conj (vec (butlast ret)) (conj (last ret) fs))
+                   (conj ret [fs]))))
+      ret)))
 
 (declare expand)
 
@@ -82,11 +86,13 @@
 (defn expand-seq [x]
   (if (dot? (first x))
     (throw "not supported (dot in verb position)")
-    (let [[heads tail] (dot-split x)
-          tail (if-not (next (next tail))
-                 (second tail)
-                 `(concat ~@(map expand (seq-parts tail))))]
-      `(apply ~@heads ~tail))))
+    (let [[p1 & ps] (seq-parts x)]
+      (if (seq ps)
+        `(apply ~@p1
+                ~(if (next ps)
+                   `(concat ~@(map expand ps))
+                   (expand (first ps))))
+        (expand (seq p1))))))
 
 (defn expand-vec [x]
   `(vec (concat ~@(map expand (seq-parts x)))))
@@ -104,3 +110,8 @@
       ($ x expand)
 
       x))
+
+(comment (seq-parts '(a . (b c d)))
+         (expand '(+ 1 . [2 3]))
+         (expand '(+ 1 . xs 4))
+         )

@@ -1,10 +1,10 @@
 #+title: Immutable coding
 
 
-<2023-01-17 Tue>
+** <2023-01-17 Tue>
 I would like the whole coding environment to be immutable
 
-<2023-01-19 Thu>
+** <2023-01-19 Thu>
 when adding something to the environment it is immediately compiled, self sufficiant and immutable, no references to outter env
 if doing so we will have code duplications when combining existing code fragments
 the best thing would be to strip the creation env to its bare minimum and copy it
@@ -21,5 +21,38 @@ it seems to work well
 ** <2023-01-22 Sun>
 the base is here: let, lambdas, macros, if, recursion
 *** todo
-- modules
+- collections
+- destructuration
+- generic functions
 - quasiquote
+- modules
+- effects
+** <2023-01-24 Tue>
+the bind thing seems to be really powerful
+because it let you return one value in its context
+In previous models, some operations are stepping the environment and some others are building values
+Here we do both and it yield to great flexibility
+For instance, I was thinking about polymorphism, e.g generic functions
+Most of the time it is not really needed because the implementation can be determined at compile time.
+Any defined node in the env has the potential to 'bind' its operands as it wants
+So if we keep track of the types of the nodes, a particular call can be compiled to the good implementation.
+Types can be represented as nodes too, those nodes could hold some kind of prototype if we want
+but it seems quite limitating, generic functions could hold their dispatches for greater flexibility
+we are not limited to first argument dispatch this way.
+*** types
+**** basic edn types
+- booleans
+- keywords
+- symbols
+- numbers
+- strings
+- vectors
+- maps
+- sets
+- lists
+**** inference
+- functions nodes are responsible to determine the type of their return value on a call basis
+- when used as value, functions nodes can be asked by the function consuming it to provide type informations
+- we will have to give the system some informations about external functions
+- when no type information is known about an operand, the operator can provide it
+- we will be able to throw on type inconstitencies

@@ -71,3 +71,22 @@ The three main types of definition we will deal with are:
 - namespace emission (without parametric modules)
 - automatic reloading
 - in-file evaluation
+
+* Immutable coding
+
+The clojure environment is full of mutable things: vars
+Could we envisage an immutable one
+The whole env is a value, no files
+
+** difficulties
+
+some useful construct are mutable in essence
+- declare
+- mutual recursion
+- protocols
+
+** implications
+
+in order to extend behaviors of existing code we have to clone it entirely
+we can not break working code
+we can optimise much

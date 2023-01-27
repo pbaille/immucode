@@ -423,11 +423,24 @@
 
       (tree/put '[qt]
                 {:evaluate
-                 (fn [_ _] (u/throw [:sub.evaluate :not-implemented]))
+                 (fn [_ _] (u/throw [:qt.evaluate :not-implemented]))
 
                  :bind
                  (fn [env [content]]
-                   (bind env (quote/quote-fn 0 content)))})))
+                   (bind env (quote/quote-fn 0 content)))})
+
+      (tree/put '[module]
+                {:evaluate ()
+                 :bind (fn [env args]
+                         (let [env (assoc env :module true)]
+                           (if (vector? (first args))
+                             (assoc env
+                                    :parametric true
+                                    :bind (fn [env2 parameters]
+                                            (-> (reduce (fn [e [sym expr]] (bind e sym expr))
+                                                     env2 (map vector (first args) parameters))
+                                                (bind (cons 'module (next args))))))
+                             (apply bind env args))))})))
 
 (defmacro progn
   "Takes a flat series of bindings followed or not by a return value.
@@ -435,10 +448,6 @@
   [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
-
-
-
-
 
 (do :tries
 
@@ -602,4 +611,16 @@
                      [a m]))
 
             (progn f (fn [x [a b c]] (+ x a b c))
-                   (f 1 [2 3 4])))))
+                   (f 1 [2 3 4])))
+
+        (do :modules
+
+            (progn math (module add (fn [x y] (+ x y))
+                                sub (fn [x y] (- x y)))
+                   (math.add 1 2))
+
+            (progn num (module [x]
+                               add (fn [y] (+ x y))
+                               sub (fn [y] (- x y)))
+                   one (num 1)
+                   (one.add 4)))))

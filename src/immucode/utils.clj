@@ -23,6 +23,18 @@
     (mapv symbol
           (str/split (name x) #"\."))))
 
+(defn concatv [& xs]
+  (reduce into [] xs))
+
+(defn member? [xs e]
+  (contains? (set xs) e))
+
+(defn indexof [xs e]
+  (and (member? xs e)
+       (loop [i 0 [x & xs] xs]
+         (if (= x e)
+           i (recur (inc i) xs)))))
+
 (defn $vals
   [m f]
   (into {} (map (fn [[k v]] [k (f v)]) m)))
@@ -83,3 +95,7 @@
 
 (defmacro type-case [x & xs]
   `(case (simple-type ~x) ~@xs))
+
+(defmacro with-gensyms [xs & body]
+  `(let [~xs (map gensym ~(mapv #(str (name %) "_") xs))]
+     ~@body))

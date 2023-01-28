@@ -201,14 +201,14 @@
                                        (indexed-subenvs env)))
 
                 ;; let and lambda
-                return (let [subbuild (build (tree/at env (:return env))
-                                             (assoc options
-                                                    :captures deps
-                                                    :binding-symbol-compiler
-                                                    (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p)))))]
+                return (let [code (build (tree/at env (:return env))
+                                         (assoc options
+                                                :captures (into (set captures) deps)
+                                                :binding-symbol-compiler
+                                                (fn [p] (binding-symbol-compiler (or (path/remove-prefix p (:return env)) p)))))]
                          (if (:lambda env)
-                           (lambda-compiler (:name env) (:argv env) subbuild)
-                           subbuild))
+                           (lambda-compiler (:name env) (:argv env) code)
+                           code))
 
                 ;; value or locally bound symbol
                 :else (or local value)))]
@@ -411,10 +411,12 @@
                                     :predicates predicates
                                     :bind (fn [env2 args]
                                             (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                  subenvs (next (indexed-subenvs returned-env))]
+                                                  subenvs (next (indexed-subenvs returned-env))
+                                                  arg-check (fn [check arg] (or (= '_ check) (check arg)))
+                                                  match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
                                               (loop [candidates (map-indexed vector predicates)]
                                                 (if-let [[[idx pred] & cs] (seq candidates)]
-                                                  (if (every? identity (map #(%1 %2) pred subenvs))
+                                                  (if (match? pred subenvs)
                                                     (assoc-in returned-env [:node 0]
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))

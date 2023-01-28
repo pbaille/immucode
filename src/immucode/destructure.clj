@@ -79,12 +79,12 @@
 (do :sym
 
     (defn symbol-mode [s default]
-      (let [default (or default :short)]
+      (let [default (or default :short-circuiting)]
         (condp = (first (name s))
           \¡ default
-          \? :opt
+          \? :optional
           \! :strict
-          \_ :short
+          \_ :short-circuiting
           default)))
 
     (defn parse-symbol [x & [options]]
@@ -93,12 +93,6 @@
         {:prefix prefix
          :name (if prefix (or (and (next name) (symbol (subs name 1))) (gensym)) x)
          :mode (symbol-mode x (:binding-mode options))}))
-
-    (defn symbol-form [seed mode]
-      (condp = mode
-        :short seed
-        :opt `(or ~seed nil) ;; TODO this nil prevents us to switch to nil based shortcircuiting (for performances)
-        :strict `(or ~seed (u/throw "strict binding failure:\n" (:data ~seed)))))
 
     (comment
       (bindings '!a 'x {})
@@ -114,6 +108,10 @@
        (apply u/concatv
               (bindings [seedsym seed] options)
               (map #(bindings % seedsym options) xs))))
+
+   :or
+   (fn [[p default] seed options]
+     ())
 
    :ks
    (fn [xs seed options]
@@ -163,7 +161,7 @@
        (let [{:keys [name mode]}
              (parse-symbol x options)]
          [(with-meta name {:mode mode})
-          seed #_(symbol-form seed mode)])
+          seed])
 
        vector?
        (if (composite/single-dotted? x)
@@ -178,82 +176,82 @@
        seq?
        (let [[v & args] x]
          (if-let [k (and (symbol? v) (keyword v))]
-           (if-let [op (get operators k)]
+           (if-let [op (get (merge operators (:operators options)) k)]
              (op args seed options)))))))
 
-(do :compilation
-
-    (defn unified
-      "takes a binding vector (like let) , compile it with 'bindings
+(defn unified
+  "takes a binding vector (like let) , compile it with 'bindings
        then add unification constraints on symbols that occurs multiple times"
-      [xs & [options]]
-      (loop [ret [] seen #{}
-             [a b & nxt] (bindings xs options)]
-        (if a
-          (if (seen a)
-            (recur (u/concatv ret (bindings (gensym) `(= ~a ~b) options)) seen nxt)
-            (recur (conj ret a b) (conj seen a) nxt))
-          ret)))
+  [xs & [options]]
+  (loop [ret [] seen #{}
+         [a b & nxt] (bindings xs options)]
+    (if a
+      (if (seen a)
+        (recur (u/concatv ret (bindings (gensym) `(= ~a ~b) options)) seen nxt)
+        (recur (conj ret a b) (conj seen a) nxt))
+      ret)))
 
-    #_(defn optimize
-      ([{:as ret :keys [todo bindings env]}]
-       (if (not (seq todo))
-         ret
-         (optimize
-           (let [[sym expr & todo] todo]
+(comment :compilation
 
-             (if (and (symbol? expr)
-                      ;; is not rebound later
-                      (not (contains? (set (take-nth 2 todo)) expr)))
+    (defn optimize
+         ([{:as ret :keys [todo bindings env]}]
+          (if (not (seq todo))
+            ret
+            (optimize
+             (let [[sym expr & todo] todo]
 
-               {:bindings bindings
-                :todo todo
-                :env (env/substitute env sym expr)}
+               (if (and (symbol? expr)
+                        ;; is not rebound later
+                        (not (contains? (set (take-nth 2 todo)) expr)))
 
-               {:bindings (vec/cat bindings [sym (exp/expand env expr)])
-                :env (env/shadow env sym)
-                :todo todo})))))
-      ([env bs]
-       (optimize {:todo bs :env env :bindings []})))
+                 {:bindings bindings
+                  :todo todo
+                  :env (env/substitute env sym expr)}
 
-    #_(defn compile-let-form
-      ([{:keys [env return options] bs :bindings}]
+                 {:bindings (vec/cat bindings [sym (exp/expand env expr)])
+                  :env (env/shadow env sym)
+                  :todo todo})))))
+         ([env bs]
+          (optimize {:todo bs :env env :bindings []})))
 
-       #_(println "compile-let-form " bs return options)
-       (let [bs (bindings bs options)
-             bs (if (:unified options) (unified bs options) bs)
-             {:keys [env bindings]} (optimize env bs)
-             return (exp/expand env return)]
-         #_(println "ret exp " return)
-         #_(pp env)
-         (if-not (seq bindings)
-           return
-           (loop [return return
-                  [[p1 e1] & pes :as bs]
-                  (reverse (partition 2 bindings))]
-             (if-not (seq bs)
-               return
-               (let [mode (:mode (meta p1))]
-                 (recur (condp = mode
-                          :opt
-                          (if (= p1 return)
-                            e1 `(let [~p1 ~e1] ~return))
+    (defn compile-let-form
+        ([{:keys [env return options] bs :bindings}]
 
-                          :strict
-                          `(let [~p1 ~e1]
-                             (if (rug.core/success? ~p1)
-                               ~return
-                               (e/error "strict binding failure:\n" (:data ~p1))))
+         #_(println "compile-let-form " bs return options)
+         (let [bs (bindings bs options)
+               bs (if (:unified options) (unified bs options) bs)
+               {:keys [env bindings]} (optimize env bs)
+               return (exp/expand env return)]
+           #_(println "ret exp " return)
+           #_(pp env)
+           (if-not (seq bindings)
+             return
+             (loop [return return
+                    [[p1 e1] & pes :as bs]
+                    (reverse (partition 2 bindings))]
+               (if-not (seq bs)
+                 return
+                 (let [mode (:mode (meta p1))]
+                   (recur (condp = mode
+                            :opt
+                            (if (= p1 return)
+                              e1 `(let [~p1 ~e1] ~return))
 
-                          :short
-                          (if (= p1 return)
-                            e1 `(let [~p1 ~e1]
-                                  (if (rug.core/success? ~p1)
-                                    ~return
-                                    ~p1))))
-                        pes)))))))
+                            :strict
+                            `(let [~p1 ~e1]
+                               (if (rug.core/success? ~p1)
+                                 ~return
+                                 (e/error "strict binding failure:\n" (:data ~p1))))
 
-      ([env bindings return options]
-       (compile-let-form
-         {:env env :bindings bindings
-          :return return :options options}))))
+                            :short
+                            (if (= p1 return)
+                              e1 `(let [~p1 ~e1]
+                                    (if (rug.core/success? ~p1)
+                                      ~return
+                                      ~p1))))
+                          pes)))))))
+
+        ([env bindings return options]
+         (compile-let-form
+          {:env env :bindings bindings
+           :return return :options options}))))

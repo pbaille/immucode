@@ -56,3 +56,14 @@ we are not limited to first argument dispatch this way.
 - we will have to give the system some informations about external functions
 - when no type information is known about an operand, the operator can provide it
 - we will be able to throw on type inconstitencies
+** <2023-01-27 Fri>
+almost here
+*** primitives
+define a set of functions that have to be here on the host plateform
+It should also be able to provide type informations for the inference macanism
+*** dispatch
+**** runtime
+bring back =question-mark= macro code
+**** compile-time
+- the =multi-fn.simple= bind function let you choose a dispatch at bind time
+- a chain of binding functins that can fail returning nil could be handy too

@@ -228,16 +228,16 @@
 
   (-> {}
       ;; let
-      (tree/put '[let]
+      (tree/put '[let1]
                 {:evaluate
-                 (fn [env [bindings return]]
+                 (fn [env [[pattern expr] return]]
                    (-> (reduce (fn [e [argsym argval]]
                                  (tree/put e [argsym] :value (evaluate e argval)))
-                               env (partition 2 (destructure/bindings bindings {})))
+                               env (partition 2 (destructure/bindings pattern expr {})))
                        (evaluate return)))
 
                  :bind
-                 (fn [env [bindings return]]
+                 (fn [env [[pattern expr] return]]
 
                    (let [return-symbol '__return__
 
@@ -246,24 +246,38 @@
 
                          initial
                          (assoc env
-                                :form (list 'let bindings return)
-                                :local-scope true
+                                :pattern pattern
+                                :seed expr
                                 :return return-path)
 
                          with-bindings
                          (reduce (fn [e [sym expr]]
                                    (bind e sym expr))
                                  initial
-                                 (partition 2 (destructure/bindings bindings {})))]
+                                 (partition 2 (destructure/bindings pattern expr {})))]
 
                      (bind with-bindings
                            return-symbol
                            return)))})
+      (tree/put '[let]
+                ;; TODO add named let (using lambda)
+                {:evaluate
+                 (fn [env [bindings return]]
+                   (evaluate env
+                             (reduce (fn [ret binding] (list 'let1 binding ret))
+                                     return (partition 2 bindings))))
+
+                 :bind
+                 (fn [env [bindings return]]
+                   (bind env
+                         (reduce (fn [ret binding] (list 'let1 binding ret))
+                                 return (partition 2 bindings))))})
       ;; lambda
       (tree/put '[fn]
                 {:evaluate
                  (fn [env [argv return]]
                    (fn [& xs]
+                     ;; TODO add recursion
                      (-> (reduce (fn [e [argsym argval]]
                                    (tree/put e [argsym] :value argval))
                                  env (zipmap argv xs))
@@ -315,6 +329,29 @@
                            return-symbol
                            return-expression)))})
 
+      ;; module
+      (tree/put '[module]
+                {:evaluate ()
+                 :bind (fn [env args]
+                         (let [env (assoc env :module true)]
+                           (if (vector? (first args))
+                             (assoc env
+                                    :parametric true
+                                    :bind (fn [env2 parameters]
+                                            (-> (reduce (fn [e [sym expr]] (bind e sym expr))
+                                                        env2 (map vector (first args) parameters))
+                                                (bind (cons 'module (next args))))))
+                             (apply bind env args))))})
+
+      ;; eval
+      (tree/put '[eval]
+                {:evaluate
+                 (fn [env [expr]]
+                   (evaluate env expr))
+                 :bind
+                 (fn [env [expr]]
+                   (bind env (evaluate env expr)))})
+
       ;; mac
       (tree/put '[mac]
                 {:bind
@@ -342,7 +379,15 @@
                  :bind
                  (fn [env [x]] (assoc env :value (list 'quote x)))})
 
-      ;; if
+      (tree/put '[qt]
+                {:evaluate
+                 (fn [_ _] (u/throw [:qt.evaluate :not-implemented]))
+
+                 :bind
+                 (fn [env [content]]
+                   (bind env (quote/quote-fn 0 content)))})
+
+      ;; control
       (tree/put '[if]
                 {:evaluate
                  (fn [env [test then else]]
@@ -358,6 +403,13 @@
                          0 test
                          1 then
                          2 else))})
+
+      (tree/put '[?]
+                {:evaluate
+                 ()
+                 :bind
+                 (fn [env args]
+                   ())})
 
       ;; collections
       (tree/put '[vector]
@@ -423,33 +475,7 @@
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                             (map-indexed vector implementations))))})
-
-      (tree/put '[qt]
-                {:evaluate
-                 (fn [_ _] (u/throw [:qt.evaluate :not-implemented]))
-
-                 :bind
-                 (fn [env [content]]
-                   (bind env (quote/quote-fn 0 content)))})
-
-      (tree/put '[module]
-                {:evaluate ()
-                 :bind (fn [env args]
-                         (let [env (assoc env :module true)]
-                           (if (vector? (first args))
-                             (assoc env
-                                    :parametric true
-                                    :bind (fn [env2 parameters]
-                                            (-> (reduce (fn [e [sym expr]] (bind e sym expr))
-                                                     env2 (map vector (first args) parameters))
-                                                (bind (cons 'module (next args))))))
-                             (apply bind env args))))})
-
-      (tree/put '[eval]
-                {:bind (fn [env [expr]]
-                         (println expr)
-                         (bind env (evaluate env expr)))})))
+                             (map-indexed vector implementations))))})))
 
 (defmacro progn
   "Takes a flat series of bindings followed or not by a return value.
@@ -458,9 +484,10 @@
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
 
-(bind ENV0 '~(+ 1 2))
-(progn x ~(+ 1 2)
-       )
+(do :unquote
+    (bind ENV0 '~(+ 1 2))
+    (progn x ~(+ 1 2)
+           x))
 
 (do :tries
 
@@ -637,5 +664,3 @@
                                sub (fn [y] (- x y)))
                    one (num 1)
                    (one.add 4)))))
-
-(do '~(+ 1 2))

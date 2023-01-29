@@ -3,6 +3,8 @@
             [immucode.utils :as u]
             [clojure.string :as str]))
 
+;; TODO use thunks only when needed (better performances)
+
 ;; thunk : lambda of zero argument
 
 (defn- thunk-symbols
@@ -10,34 +12,35 @@
   ([] (map #(gensym (str "case_" % "_")) (range))))
 
 (defn- compile-case
-  [{:as   case'
+  [{:as   this
     :keys [test bindings return next]}]
-  (let [cont (when next (list next))]
+  (let [skip (when next (list next))]
     (cond
-      test `(if ~test ~return ~cont)
-      bindings (let [[b1 b2 & bs] bindings]
+      test (list 'if test return skip)
+      bindings (let [[b1 b2 & bs] bindings
+                     return (compile-case (assoc this :bindings bs))]
+
                  (case (:mode (meta b1)
                               :short-circuiting)
 
                    :optional
-                   `(let [~b1 ~b2]
-                      ~(compile-case (assoc case' :bindings bs)))
+                   (list 'let [b1 b2]
+                         return)
 
                    :short-circuiting
-                   `(if-let [~b1 ~b2]
-                      ~(compile-case (assoc case' :bindings bs))
-                      ~cont)
+                   (list 'let [b1 b2]
+                         (list 'if b1 return skip))
 
                    :strict
-                   `(if-let [~b1 ~b2]
-                      ~(compile-case (assoc case' :bindings bs))
-                      (u/throw [::strict-binding ['~b1 '~b2]]))))
+                   (list 'let [b1 b2]
+                         (list 'if b1 return
+                               `(u/throw [::strict-binding ['~b1 '~b2]])))))
       :else return)))
 
 (defn- cases->thunks
   [cases]
   (mapv (fn [case]
-          (list (:symbol case) [] (compile-case case)))
+          [(:symbol case) (list 'fn [] (compile-case case))])
         cases))
 
 (defn- normalize-body
@@ -61,10 +64,12 @@
 
 (defn- emit-form
   [body]
-  (let [thunks (-> (body->cases body) cases->thunks)
-        return (nth (first thunks) 2)]
-    (if-let [bindings (some-> (next thunks) vec)]
-      `(letfn ~(reverse bindings) ~return)
+  (let [cases (body->cases body)
+        return (compile-case (first cases))]
+    (if (next cases)
+      (let [bindings (->> (cases->thunks (next cases))
+                          reverse (mapcat identity) vec)]
+        (list 'let bindings return))
       return)))
 
 (defmacro ?

@@ -64,7 +64,9 @@
                    (assoc env :local (:local found))
                    (assoc env :link (tree/position found)))
                  (if-let [resolved (resolve expr)]
-                   (assoc env :var resolved)
+                   (if (= #'clojure.core/unquote resolved)
+                     (assoc env :link '[eval])
+                     (assoc env :var resolved))
                    (u/throw [:unresolvable expr :in env])))
 
        seq? (if-let [f (-> (bind env (first expr))
@@ -442,7 +444,12 @@
                                             (-> (reduce (fn [e [sym expr]] (bind e sym expr))
                                                      env2 (map vector (first args) parameters))
                                                 (bind (cons 'module (next args))))))
-                             (apply bind env args))))})))
+                             (apply bind env args))))})
+
+      (tree/put '[eval]
+                {:bind (fn [env [expr]]
+                         (println expr)
+                         (bind env (evaluate env expr)))})))
 
 (defmacro progn
   "Takes a flat series of bindings followed or not by a return value.
@@ -450,6 +457,10 @@
   [& xs]
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
+
+(bind ENV0 '~(+ 1 2))
+(progn x ~(+ 1 2)
+       )
 
 (do :tries
 
@@ -626,3 +637,5 @@
                                sub (fn [y] (- x y)))
                    one (num 1)
                    (one.add 4)))))
+
+(do '~(+ 1 2))

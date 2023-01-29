@@ -5,7 +5,8 @@
             [immucode.composite-literals :as composite]
             [immucode.destructure :as destructure]
             [immucode.quote :as quote]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [immucode.control :as control]))
 
 (do :help
 
@@ -409,7 +410,7 @@
                  ()
                  :bind
                  (fn [env args]
-                   ())})
+                   (bind env (control/emit-form args)))})
 
       ;; collections
       (tree/put '[vector]
@@ -489,6 +490,10 @@
     (progn x ~(+ 1 2)
            x))
 
+(do :control
+
+    (bind ENV0 '(? (pos? 1) :ok :ko))
+    (progn (? (pos? 1) :ok :ko)))
 (do :tries
 
     (do :bind

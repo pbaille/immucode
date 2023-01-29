@@ -62,7 +62,7 @@
         (partition 2 (normalize-body body))
         (partition 2 1 (thunk-symbols))))
 
-(defn- emit-form
+(defn emit-form
   [body]
   (let [cases (body->cases body)
         return (compile-case (first cases))]

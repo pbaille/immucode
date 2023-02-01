@@ -72,8 +72,9 @@
    (reduce (fn [e [k v]] (put e path k v)) tree m)))
 
 (defn children [tree]
-  (map (partial cd tree)
-       (keys (:node tree))))
+  (if-let [node (:node tree)]
+    (mapv (comp (partial cd tree) vector)
+          (keys node))))
 
 (do :show
 

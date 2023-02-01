@@ -67,7 +67,7 @@
 
        symbol? (if-let [found (bubfind env expr)]
                  (assoc env :link (tree/position found))
-                 (u/throw [:unresolvable expr :in env]))
+                 (bind env (list 'external expr)))
 
        seq? (if-let [f (-> (bind env (first expr))
                            (resolve-key :bind))]
@@ -89,10 +89,12 @@
                  path #(bind % expr)))))
 
   ([env sym expr & more]
-   (let [[bindings return] (pairs&return (list* sym expr more))]
-     (-> (reduce (fn [env [sym expr]] (bind env sym expr))
-                 env bindings)
-         (bind return)))))
+   (let [[bindings return] (pairs&return (list* sym expr more))
+         bound (reduce (fn [env [sym expr]] (bind env sym expr))
+                       env bindings)]
+     (if return
+       (bind bound return)
+       bound))))
 
 (defn evaluate
   [env]
@@ -214,7 +216,6 @@
 
 (defn deps
   [env]
-  (println "deps" (tree/position env))
   (if-let [link (:link env)]
     (append1 (deps (tree/at env link)) link)
     (if-let [deps-fn (:deps env)]
@@ -265,6 +266,18 @@
                             :value v
                             :type type
                             type true)))})
+
+      (tree/put '[external]
+                {:interpret
+                 (fn [env [sym]]
+                   (if-let [resolved (resolve sym)]
+                     (deref resolved)
+                     (u/throw [:unresolvable sym :in env])))
+                 :bind
+                 (fn [env [sym]]
+                   (if-let [resolved (resolve sym)]
+                     (assoc env :build (fn [_] (var->qualified-symbol resolved)))
+                     (u/throw [:unresolvable sym :in env])))})
 
       (tree/put '[s-expr]
                 {:interpret
@@ -412,7 +425,7 @@
 
                           :build
                           (fn lambda-instance-build [env]
-                            (list 'fn argument-symbols
+                            (list 'fn fn-name argument-symbols
                                   (build (tree/at env return-path))))))))})
 
       ;; module
@@ -483,12 +496,17 @@
 
                  :bind
                  (fn [env [test then else]]
-                   (bind (assoc env
-                                :branch (list 'if test then else)
-                                :indexed 3)
-                         0 test
-                         1 then
-                         2 else))})
+                   (-> (bind env
+                          0 test
+                          1 then
+                          2 else)
+                       (assoc
+                        :if (list 'if test then else)
+                        :build
+                        (fn [env]
+                          (println "here")
+                          (cons 'if
+                                (map build (tree/children env)))))))})
 
       (tree/put '[?]
                 {:interpret
@@ -506,10 +524,15 @@
                  :bind
                  (fn [env xs]
                    (if (composite/composed? xs)
-                     (bind env (composite/expand-vec xs))
-                     (reduce (fn [e [i v]] (bind e [i] v))
-                             (assoc env :vector true :indexed (count xs))
-                             (map-indexed vector xs))))})
+                     (do (println "composed " xs (composite/expand-vec xs))
+                         (bind env (composite/expand-vec xs)))
+                     (-> (reduce (fn [e [i v]] (bind e [i] v))
+                              (assoc env :vector true :indexed (count xs))
+                              (map-indexed vector xs))
+                         (assoc
+                          :build
+                          (fn [env]
+                            (mapv build (tree/children env)))))))})
 
       (tree/put '[map-entry]
                 {:interpret
@@ -518,7 +541,7 @@
 
                  :bind
                  (fn [env [k v]]
-                   (bind (assoc env :indexed 2 :map-entry true)
+                   (bind (assoc env :map-entry true)
                          0 k 1 v))})
 
       (tree/put '[hash-map]
@@ -531,9 +554,14 @@
                    (let [hm (into {} xs)]
                      (if (composite/composed? hm)
                        (bind env (composite/expand-map hm))
-                       (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
-                               (assoc env :hash-map true :indexed (count xs))
-                               (map-indexed vector xs)))))})
+                       (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
+                                (assoc env :hash-map true :indexed (count xs))
+                                (map-indexed vector xs))
+                           (assoc
+                            :build
+                            (fn [env]
+                              (into {} (map (fn [e] (mapv build (tree/children e)))
+                                            (tree/children env)))))))))})
 
       ;; multi functions
       (tree/put '[multi-fn simple]
@@ -563,32 +591,25 @@
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
                              (map-indexed vector implementations))))})))
 
-(defmacro progn
-  "Takes a flat series of bindings followed or not by a return value.
-   Build the corresponding program using default options."
-  [& xs]
-  (-> (apply bind ENV0 xs)
-      (build DEFAULT_COMPILER_OPTS)))
+(defmacro prog [& xs]
+  (let [[pairs return] (pairs&return xs)
+        bound (reduce (fn [e [k v]] (bind e k v)) ENV0 pairs)]
+    (if return
+      (let [return-symbol (gensym "ret_")]
+        (compile (bind bound return-symbol return)
+                 return-symbol))
+      (compile bound (first (last pairs))))))
 
 (do :tries-refactoring
-
-    (def ENV+
-      (tree/put ENV0 '[+] {:value +}))
 
     (defmacro bind0 [& xs]
       `(bind ENV+ ~@(map quote/quote-wrap xs)))
 
     (bind0 (fn [a b] (+ a b)))
 
-    (defmacro prog [& xs]
-      (let [[pairs return] (pairs&return xs)
-            bound (reduce (fn [e [k v]] (bind e k v)) ENV+ pairs)]
-        (if return
-          (let [return-symbol (gensym "ret_")]
-            (compile (bind bound return-symbol return)
-                     return-symbol))
-          (compile bound (first (last pairs))))))
 
+    (cd (bind ENV0 't '(if true :ok :ko))
+             't)
     (prog (let [x 1 y x]  (+ x y)))
     (prog (let [x 1 f (fn [y] (+ x y))]  (f 3)))
     (prog x 1 (+ x x))
@@ -612,189 +633,190 @@
       (compile (bind e 'ret '(let [x (+ 1 2 3) y x] (+ y 5)))
                'ret)))
 
-(comment
-  (do :tries
+(do :tries
 
-     (do :bind
+    (comment
+      (do :bind
 
-         (build (bind ENV0 'x 1 'y 2 '(+ x y))
-                DEFAULT_COMPILER_OPTS)
+          (build (bind ENV0 'x 1 'y 2 '(+ x y))
+                 DEFAULT_COMPILER_OPTS)
 
-         (bind ENV0 'f '(fn [a] a))
+          (bind ENV0 'f '(fn [a] a))
 
-         (bind ENV0 'ret '(let [a 1] a))
+          (bind ENV0 'ret '(let [a 1] a))
 
-         (-> ENV0
-             (bind 'ret '(let [a 1 b 2] (+ a b)))
-             (cd 'ret))
+          (-> ENV0
+              (bind 'ret '(let [a 1 b 2] (+ a b)))
+              (cd 'ret))
 
-         (-> ENV0
-             (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
-             (bind 'ret '(f 1))
-             (cd 'ret))
+          (-> ENV0
+              (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
+              (bind 'ret '(f 1))
+              (cd 'ret))
 
-         (def E1
-           (-> ENV0
-               (bind 'x 1)
-               (bind 'x-link 'x)
-               (bind 'y 2)
-               (bind 'a 34)
-               (bind 'z '(+ x y))
-               (bind 'ret '(+ z z))
-               (bind 'fun '(fn [a b c] (+ a b c z)))
-               (bind 'ret2 '(fun x ret a))))
+          (def E1
+            (-> ENV0
+                (bind 'x 1)
+                (bind 'x-link 'x)
+                (bind 'y 2)
+                (bind 'a 34)
+                (bind 'z '(+ x y))
+                (bind 'ret '(+ z z))
+                (bind 'fun '(fn [a b c] (+ a b c z)))
+                (bind 'ret2 '(fun x ret a))))
 
-         (bind ENV0 'f '(fn [x y] (let [z 5] (- z x y)))))
+          (bind ENV0 'f '(fn [x y] (let [z 5] (- z x y)))))
 
-     (do :interpret
-         E1
-         (cd E1 '[z 1])
-         (interpret E1 'x)
-         (interpret E1 'x-link)
-         (interpret E1 'z)
-         (interpret E1 'ret)
-         ((interpret ENV0 '(fn [a] a))
-          1)
-         (interpret ENV0
-                    '((mac [_ args] (list (second args) (first args) (nth args 2)))
-                      1 + 2)))
+      (do :interpret
+          E1
+          (cd E1 '[z 1])
+          (interpret E1 'x)
+          (interpret E1 'x-link)
+          (interpret E1 'z)
+          (interpret E1 'ret)
+          ((interpret ENV0 '(fn [a] a))
+           1)
+          (interpret ENV0
+                     '((mac [_ args] (list (second args) (first args) (nth args 2)))
+                       1 + 2)))
 
-     (do :build
-         (build (cd E1 'ret)
-                DEFAULT_COMPILER_OPTS)
+      (do :build
+          (build (cd E1 'ret)
+                 DEFAULT_COMPILER_OPTS)
 
-         (eval (build (cd E1 'ret2)
-                      DEFAULT_COMPILER_OPTS))
+          (eval (build (cd E1 'ret2)
+                       DEFAULT_COMPILER_OPTS))
 
-         (-> ENV0
-             (bind 'y 23)
-             (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
-             (bind 'ret '(f 1))
-             (cd 'ret)
-             (build DEFAULT_COMPILER_OPTS)))
+          (-> ENV0
+              (bind 'y 23)
+              (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
+              (bind 'ret '(f 1))
+              (cd 'ret)
+              (build DEFAULT_COMPILER_OPTS))))
 
-     (do :progn
+    (do :progn
 
-         (do :simple
+        (do :simple
 
-             (progn x 1 y 2 (+ x y))
+            (prog x 1 y 2 (+ x y))
 
-             (progn (let [x 1 y 2] (+ y x)))
+            (prog (let [x 1 y 2] (+ y x)))
 
-             (progn (let [x 1 y 3]
-                      (let [z 5]
-                        (+ x y z))))
+            (prog (let [x 1 y 3]
+                     (let [z 5]
+                       (+ x y z))))
 
-             (progn x 1
-                    f (fn [a b] (let [y 4] (+ x y a b)))
-                    (f 4 5))
+            (prog x 1
+                   f (fn [a b] (let [y 4] (+ x y a b)))
+                   (f 4 5))
 
-             (progn x 1 y x (+ y y)))
+            (prog x 1 y x (+ y y)))
 
-         (do :lambda
+        (do :lambda
 
-             (progn ((fn [a b] (+ a b)) 1 2)))
+            (prog ((fn [a b] (+ a b)) 1 2))
+            (prog f (fn [a b] (+ a b)) (f 1 2)))
 
-         (do :nested-bindings
+        (do :nested-bindings
 
-             #_(progn x 1
-                      y (let [z 3] (+ x z))
-                      (+ y.z x y)))
+            #_(prog x 1
+                     y (let [z 3] (+ x z))
+                     (+ y.z x y)))
 
-         (do :mac
+        (do :mac
 
-             (progn infix (mac [_ args] (list (second args) (first args) (nth args 2)))
-                    (infix 1 + 2))
+            (prog infix (mac [_ args] (list (second args) (first args) (nth args 2)))
+                   (infix 1 + 2))
 
-             (progn ((mac [_ args] (list (second args) (first args) (nth args 2)))
-                     1 + 2))
+            (prog ((mac [_ args] (list (second args) (first args) (nth args 2)))
+                    1 + 2))
 
-             (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
+            (bind ENV+ 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
-             (bind ENV0 'm '(binder [e _] e))
+            (bind ENV+ 'm '(binder [e _] e))
 
-             (progn this-value 4
-                    m (binder [e args] (bind
-                                        (bind
-                                         (bind e 'this this-value)
-                                         'return (first args))
-                                        'return))
-                    (m (list this)))
-
-             (progn this-value 4
-                    m (binder [e args] (bind
+            (prog this-value 4
+                   m (binder [e args] (bind
+                                       (bind
                                         (bind e 'this this-value)
-                                        (first args)))
-                    (m (list this)))
+                                        'return (first args))
+                                       'return))
+                   (m (list this)))
 
-             #_ (progn m (mac [e args] (build
-                                        (bind (bind e 'this :this)
-                                              (first args))
-                                        DEFAULT_COMPILER_OPTS))
-                       (m this)))
+            #_(prog this-value 4
+                   m (binder [e args] (bind
+                                       (bind e 'this this-value)
+                                       (first args)))
+                   (m (list this)))
 
-         (do :quote
+            #_ (prog m (mac [e args] (build
+                                       (bind (bind e 'this :this)
+                                             (first args))
+                                       DEFAULT_COMPILER_OPTS))
+                      (m this)))
 
-             (progn 'io)
-             (progn ((mac [_ args] (list '+ (first args) (second args))) 1 2)))
+        (do :quote
 
-         (do :if
+            (prog 'io)
+            (prog ((mac [_ args] (list '+ (first args) (second args))) 1 2)))
 
-             (progn (if true :ok :ko))
-             (progn (if (= 1 ((fn [a] a) 2))
-                      (let [x 1 y 2] (+ x y))
-                      'ko)))
+        (do :if
 
-         (do :recursion
+            (prog (if true :ok :ko))
+            #_(prog (if (= 1 ((fn [a] a) 2))
+                     (let [x 1 y 2] (+ x y))
+                     'ko)))
 
-             (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
-             (progn f (fn [x] (if (pos? x) (f (dec x)) :done))
-                    (f 10)))
+        (do :recursion
 
-         (do :collection
-             (progn x 1 y 2 [x y])
-             (progn x 1 y :foo {y x})
-             (progn xs (range 3)
-                    [:op . xs])
-             (progn x 1 y :foo z {y x}
-                    {:a 3 . z}))
+            (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
+            (prog f (fn [x] (if (pos? x) (f (dec x)) :done))
+                   (f 10)))
 
-         (do :multi-fn
-             (progn mf (multi-fn.simple [x y]
-                                        [:number :number] (+ x y)
-                                        [:string :string] (str x y))
-                    n (mf 1 2)
-                    s (mf "io " "gro.")
-                    [n s]))
+        (do :collection
+            (prog x 1 y 2 [x y])
+            (prog x 1 y :foo {y x})
+            (prog xs (range 3)
+                   [:op . xs])
+            (prog x 1 y :foo z {y x}
+                   {:a 3 . z}))
 
-         (do :destructure
-             (progn (let [[x . xs] (range 10)]
-                      [x xs]))
+        (do :multi-fn
+            (prog mf (multi-fn.simple [x y]
+                                       [:number :number] (+ x y)
+                                       [:string :string] (str x y))
+                   n (mf 1 2)
+                   s (mf "io " "gro.")
+                   [n s]))
 
-             (progn (let [{:a a . m} {:a 1 :b 2 :c 3}]
-                      [a m]))
+        (do :destructure
+            (prog (let [[x . xs] (range 10)]
+                     [x xs]))
 
-             (progn f (fn [x [a b c]] (+ x a b c))
-                    (f 1 [2 3 4])))
+            (prog (let [{:a a . m} {:a 1 :b 2 :c 3}]
+                     [a m]))
 
-         (do :modules
+            (prog f (fn [x [a b c]] (+ x a b c))
+                   (f 1 [2 3 4])))
 
-             (progn math (module add (fn [x y] (+ x y))
-                                 sub (fn [x y] (- x y)))
-                    (math.add 1 2))
+        (do :modules
 
-             (progn num (module [x]
-                                add (fn [y] (+ x y))
-                                sub (fn [y] (- x y)))
-                    one (num 1)
-                    (one.add 4)))
+            (prog math (module add (fn [x y] (+ x y))
+                                sub (fn [x y] (- x y)))
+                   (math.add 1 2))
 
-         (do :unquote
-             (bind ENV0 '~(+ 1 2))
-             (progn x ~(+ 1 2)
-                    x))
+            (prog num (module [x]
+                               add (fn [y] (+ x y))
+                               sub (fn [y] (- x y)))
+                   one (num 1)
+                   (one.add 4)))
 
-         (do :control
+        (do :unquote
+            (bind ENV0 '~(+ 1 2))
+            (prog x ~(+ 1 2)
+                   x))
 
-             (bind ENV0 '(? (pos? 1) :ok :ko))
-             (progn (? (pos? 1) :ok :ko))))))
+        (do :control
+
+            (bind ENV0 '(? (pos? 1) :ok :ko))
+            (prog (? (pos? 1) :ok :ko)))))

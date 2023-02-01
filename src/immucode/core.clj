@@ -213,18 +213,30 @@
                    (local-bind-return bindings (build1 env))))))))
 
 (defn deps
-  [{:as env :keys [deps]}]
-  (if deps (deps env) ()))
+  [env]
+  (println "deps" (tree/position env))
+  (if-let [link (:link env)]
+    (append1 (deps (tree/at env link)) link)
+    (if-let [deps-fn (:deps env)]
+      (deps-fn env)
+      (if-let [children (tree/children env)]
+        (reduce deps-merge
+                () (map deps children))
+        ()))))
 
 (defn build
   [env]
-  (let [target-node (target-node env)]
-    (if (contains? target-node :value) ; handling falsy values
-      (get target-node :value)
-      (if-let [build (:build target-node)]
-        (build target-node)
+  (if (contains? env :value) ; handling falsy values
+    (get env :value)
+    (if-let [build (:build env)]
+      (build env)
+      (if-let [target-path (:link env)]
+        (let [target (tree/at env target-path)]
+          (if (:local target)
+            (last target-path)
+            (path->binding-symbol target-path)))
         (u/throw [::build "no :build nor :value fields at:"
-                  (tree/position target-node)])))))
+                  (tree/position env)])))))
 
 (defn compile
   [env expr]
@@ -267,24 +279,14 @@
                  (fn s-expr-bind [env expr]
                    (if (composite/composed? expr)
                      (bind env (composite/expand-seq expr))
-                     (let [subenvs
-                           (fn [env]
-                             (map (partial cd env)
-                                  (range (count expr))))]
-
-                       (-> (reduce (fn [env [idx subexpr]]
-                                     (bind env idx subexpr))
-                                   (assoc env :s-expr expr)
-                                   (map-indexed vector expr))
-                           (assoc
-                            :deps
-                            (fn [env]
-                              (reduce deps-merge
-                               () (map deps (subenvs env))))
-
-                            :build
-                            (fn s-expr-instance-build [env]
-                              (map build (subenvs env))))))))})
+                     (-> (reduce (fn [env [idx subexpr]]
+                                   (bind env idx subexpr))
+                                 (assoc env :s-expr expr)
+                                 (map-indexed vector expr))
+                         (assoc
+                          :build
+                          (fn s-expr-instance-build [env]
+                            (map build (tree/children env)))))))})
       ;; let
       (tree/put '[let1]
                 {:interpret
@@ -311,7 +313,8 @@
 
                          bound
                          (reduce (fn [e [sym expr]]
-                                   (bind e sym expr))
+                                   (-> (bind e sym expr)
+                                       (tree/put [sym] :local true)))
                                  env bindings)]
 
                      (-> (bind bound
@@ -321,16 +324,15 @@
                          (assoc
                           :let1 (cons 'let1 args)
                           :deps
-                          (fn [env]
+                          (fn let1-instance-deps [env]
                             (remove (partial path/parent-of at)
-                                    (reduce deps-merge (map deps (tree/children env)))))
+                                    (reduce deps-merge
+                                            () (map deps (tree/children env)))))
 
                           :build
                           (fn let1-instance-build [env]
-                            (println (tree/position env))
                             (let [bindings
                                   (map (fn [sym]
-                                         (println sym (cd env sym))
                                          [sym (build (cd env sym))])
                                        (map first bindings))]
                               (list 'let
@@ -382,17 +384,10 @@
                          argument-symbols
                          (mapv :symbol arguments)
 
-                         initial
-                         (assoc env
-                                :lambda form
-                                :name fn-name
-                                :argv argument-symbols
-                                :return return-path)
-
                          with-locals
                          (reduce (fn [e a]
                                    (tree/put e [a] :local a))
-                                 initial
+                                 (assoc env :lambda form)
                                  (cons fn-name argument-symbols))
 
                          destructuration-bindings
@@ -404,9 +399,21 @@
                            (list 'let destructuration-bindings return)
                            return)]
 
-                     (bind with-locals
-                           return-symbol
-                           return-expression)))})
+                     (-> (bind with-locals
+                               return-symbol
+                               return-expression)
+
+                         (assoc
+                          :deps
+                          (fn lambda-instance-deps [env]
+                            (remove (partial path/parent-of position)
+                                    (reduce deps-merge
+                                            () (map deps (tree/children env)))))
+
+                          :build
+                          (fn lambda-instance-build [env]
+                            (list 'fn argument-symbols
+                                  (build (tree/at env return-path))))))))})
 
       ;; module
       (tree/put '[module]
@@ -563,21 +570,47 @@
   (-> (apply bind ENV0 xs)
       (build DEFAULT_COMPILER_OPTS)))
 
-(bind ENV0 'x 1 'y 'x)
-(compile (bind ENV0 'x 1 'y 'x 'y) 'y)
-(compile (bind ENV0 'ret '(let1 [x 1] x))
-         'ret)
-(compile (bind ENV0 'ret '(let1 [x 1] (let1 [y x] y)))
-         'ret)
-(compile (bind ENV0 'ret '(let [x 1 y x] y))
-         'ret)
+(do :tries-refactoring
 
-(let [e (tree/put ENV0 '[+] {:value +})]
-  (bind e 'ret '(let [x 1 y x] (+ y 5))))
+    (def ENV+
+      (tree/put ENV0 '[+] {:value +}))
 
-(let [e (tree/put ENV0 '[+] {:value +})]
-  (compile (bind e 'ret '(let [x 1 y x] (+ y 5)))
-           'ret))
+    (defmacro bind0 [& xs]
+      `(bind ENV+ ~@(map quote/quote-wrap xs)))
+
+    (bind0 (fn [a b] (+ a b)))
+
+    (defmacro prog [& xs]
+      (let [[pairs return] (pairs&return xs)
+            bound (reduce (fn [e [k v]] (bind e k v)) ENV+ pairs)]
+        (if return
+          (let [return-symbol (gensym "ret_")]
+            (compile (bind bound return-symbol return)
+                     return-symbol))
+          (compile bound (first (last pairs))))))
+
+    (prog (let [x 1 y x]  (+ x y)))
+    (prog (let [x 1 f (fn [y] (+ x y))]  (f 3)))
+    (prog x 1 (+ x x))
+    (prog x 1 f (fn [y] (+ 7 y))  (f 3))
+    (prog x 1 f (fn [y] (+ x y))  (f 3))
+    (prog f (fn [a b] (+ a b)) (f 2 3))
+
+    (bind ENV0 'x 1 'y 'x)
+    (compile (bind ENV0 'x 1 'y 'x 'y) 'y)
+    (deps (cd (bind ENV0 'ret '(let1 [x 1] x))
+              'ret))
+    (compile (bind ENV0 'ret '(let1 [x 1] (let1 [y x] y)))
+             'ret)
+    (compile (bind ENV0 'ret '(let [x 1 y x] y))
+             'ret)
+
+    (let [e (tree/put ENV0 '[+] {:value +})]
+      (bind e 'ret '(let [x 1 y x] (+ y 5))))
+
+    (let [e (tree/put ENV0 '[+] {:value `+})]
+      (compile (bind e 'ret '(let [x (+ 1 2 3) y x] (+ y 5)))
+               'ret)))
 
 (comment
   (do :tries

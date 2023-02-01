@@ -71,6 +71,10 @@
   ([tree path m]
    (reduce (fn [e [k v]] (put e path k v)) tree m)))
 
+(defn children [tree]
+  (map (partial cd tree)
+       (keys (:node tree))))
+
 (do :show
 
     (defn- remove-parents

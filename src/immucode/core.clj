@@ -34,13 +34,6 @@
     (defn env-get [env at]
       (tree/cd (tree/root env) (path/path at)))
 
-    (defn indexed-subenvs
-      [{:as env :keys [indexed]}]
-      (assert indexed
-              (str [::expression-subenvs :not-indexed]))
-      (map (fn [idx] (tree/cd env [idx]))
-           (range indexed)))
-
     (defn target-node [env]
       (if-let [link (:link env)]
         (target-node (tree/at env link))
@@ -114,7 +107,7 @@
 
        symbol? (if-let [found (bubfind env expr)]
                  (evaluate found)
-                 (u/throw [:unresolvable expr :in env]))
+                 (interpret env (list 'external expr)))
 
        seq? (if-let [f (-> (bind env (first expr))
                            (resolve-key :interpret))]
@@ -254,6 +247,7 @@
         (list 'let (vec bindings) return)
         return))))
 
+(resolve 'clojure.core/list)
 (def ENV0
 
   (-> {}
@@ -276,7 +270,11 @@
                  :bind
                  (fn [env [sym]]
                    (if-let [resolved (resolve sym)]
-                     (assoc env :build (fn [_] (var->qualified-symbol resolved)))
+                     (if (= resolved #'clojure.core/unquote)
+                       (bind env 'eval)
+                       (assoc env
+                              :external resolved
+                              :build (fn [_] (var->qualified-symbol resolved))))
                      (u/throw [:unresolvable sym :in env])))})
 
       (tree/put '[s-expr]
@@ -425,8 +423,10 @@
 
                           :build
                           (fn lambda-instance-build [env]
-                            (list 'fn fn-name argument-symbols
-                                  (build (tree/at env return-path))))))))})
+                            (let [return (build (tree/at env return-path))]
+                              (if (symbol? fn-name)
+                                (list 'fn fn-name argument-symbols return)
+                                (list 'fn argument-symbols return))))))))})
 
       ;; module
       (tree/put '[module]
@@ -504,7 +504,6 @@
                         :if (list 'if test then else)
                         :build
                         (fn [env]
-                          (println "here")
                           (cons 'if
                                 (map build (tree/children env)))))))})
 
@@ -524,8 +523,7 @@
                  :bind
                  (fn [env xs]
                    (if (composite/composed? xs)
-                     (do (println "composed " xs (composite/expand-vec xs))
-                         (bind env (composite/expand-vec xs)))
+                     (bind env (composite/expand-vec xs))
                      (-> (reduce (fn [e [i v]] (bind e [i] v))
                               (assoc env :vector true :indexed (count xs))
                               (map-indexed vector xs))
@@ -579,7 +577,7 @@
                                     :predicates predicates
                                     :bind (fn [env2 args]
                                             (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                  subenvs (next (indexed-subenvs returned-env))
+                                                  subenvs (next (tree/children returned-env))
                                                   arg-check (fn [check arg] (or (= '_ check) (check arg)))
                                                   match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
                                               (loop [candidates (map-indexed vector predicates)]
@@ -603,13 +601,13 @@
 (do :tries-refactoring
 
     (defmacro bind0 [& xs]
-      `(bind ENV+ ~@(map quote/quote-wrap xs)))
+      `(bind ENV0 ~@(map quote/quote-wrap xs)))
 
     (bind0 (fn [a b] (+ a b)))
 
 
     (cd (bind ENV0 't '(if true :ok :ko))
-             't)
+        't)
     (prog (let [x 1 y x]  (+ x y)))
     (prog (let [x 1 f (fn [y] (+ x y))]  (f 3)))
     (prog x 1 (+ x x))
@@ -714,7 +712,11 @@
 
         (do :lambda
 
+
+            (build (bind ENV0 '(fn [a] a)))
             (prog ((fn [a b] (+ a b)) 1 2))
+            (compile (bind ENV0 't '((fn [a b] (+ a b)) 1 2))
+                     't)
             (prog f (fn [a b] (+ a b)) (f 1 2)))
 
         (do :nested-bindings
@@ -725,15 +727,15 @@
 
         (do :mac
 
-            (prog infix (mac [_ args] (list (second args) (first args) (nth args 2)))
+            (prog infix (mac [_ args] (clojure.core/list (second args) (first args) (nth args 2)))
                    (infix 1 + 2))
 
-            (prog ((mac [_ args] (list (second args) (first args) (nth args 2)))
+            (prog ((mac [_ args] (clojure.core/list (second args) (first args) (nth args 2)))
                     1 + 2))
 
-            (bind ENV+ 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
+            (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
-            (bind ENV+ 'm '(binder [e _] e))
+            (bind ENV0 'm '(binder [e _] e))
 
             (prog this-value 4
                    m (binder [e args] (bind
@@ -763,7 +765,7 @@
         (do :if
 
             (prog (if true :ok :ko))
-            #_(prog (if (= 1 ((fn [a] a) 2))
+            (prog (if (= 1 ((fn [a] a) 2))
                      (let [x 1 y 2] (+ x y))
                      'ko)))
 

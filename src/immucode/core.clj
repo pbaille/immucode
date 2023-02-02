@@ -57,22 +57,27 @@
 
   ([env expr]
 
-   (cp expr
+   (if (tree/root? env)
 
-       symbol? (if-let [found (bubfind env expr)]
-                 (assoc env :link (tree/position found))
-                 (bind env (list 'external expr)))
+     (u/throw
+      [::bind "cannot bind at top level:" expr])
 
-       seq? (if-let [f (-> (bind env (first expr))
-                           (resolve-key :bind))]
-              (f env (rest expr))
-              (bind env (cons 's-expr expr)))
+     (cp expr
 
-       vector? (bind env (cons 'vector expr))
+         symbol? (if-let [found (bubfind env expr)]
+                   (assoc env :link (tree/position found))
+                   (bind env (list 'external expr)))
 
-       map? (bind env (cons 'hash-map expr))
+         seq? (if-let [f (-> (bind env (first expr))
+                             (resolve-key :bind))]
+                (f env (rest expr))
+                (bind env (cons 's-expr expr)))
 
-       (bind env (list 'value expr))))
+         vector? (bind env (cons 'vector expr))
+
+         map? (bind env (cons 'hash-map expr))
+
+         (bind env (list 'value expr)))))
 
   ([env sym expr]
    (let [path (path/path sym)]
@@ -87,9 +92,7 @@
          bound (reduce (fn [env [sym expr]] (bind env sym expr))
                        env bindings)]
      (if return
-       (let [return-symbol (gensym "ret_")]
-         (-> (bind bound return-symbol return)
-             (bind return-symbol)))
+       (bind bound return)
        bound))))
 
 (defn evaluate
@@ -236,19 +239,28 @@
                   (tree/position env)])))))
 
 (defn compile
-  [env expr]
+  [env]
   (if-let [compile (resolve-key env :compile)]
 
-    (compile env expr)
+    (compile env)
 
-    (let [bound (bind env expr)
-          bindings (mapcat (fn [p] [(path->binding-symbol p) (build (cd env p))])
-                           (deps bound))
-          return (build bound)]
+    (if-let [bindings
+             (some->> (seq (deps env))
+                      (mapcat (fn [p] [(path->binding-symbol p) (build (tree/at env p))])))]
+      (list 'let (vec bindings) (build env))
+      (build env))))
 
-      (if (seq bindings)
-        (list 'let (vec bindings) return)
-        return))))
+(declare ENV0)
+
+(defmacro prog
+  [& body]
+  (if (even? (count body))
+    (u/throw [::prog "no return expression." (cons `prog body)])
+    (let [[pairs return] (pairs&return body)
+          return-symbol (gensym "ret_")
+          bindings (conj (vec pairs) [return-symbol return])
+          bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
+      (compile (cd bound return-symbol)))))
 
 (def ENV0
 
@@ -317,9 +329,6 @@
                    (let [at (tree/position env)
 
                          return-symbol '__return__
-
-                         return-path
-                         (conj at return-symbol)
 
                          bindings
                          (partition 2 (destructure/bindings pattern expr {}))
@@ -582,27 +591,18 @@
                                               (loop [candidates (map-indexed vector predicates)]
                                                 (if-let [[[idx pred] & cs] (seq candidates)]
                                                   (if (match? pred subenvs)
-                                                    (assoc-in returned-env [:node 0]
+                                                    (assoc-in returned-env [::node 0]
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
                              (map-indexed vector implementations))))})))
 
-(defmacro prog [& xs]
-  (let [[pairs return] (pairs&return xs)
-        bound (reduce (fn [e [k v]] (bind e k v)) ENV0 pairs)]
-    (if return
-      (let [return-symbol (gensym "ret_")]
-        (compile (bind bound return-symbol return)
-                 return-symbol))
-      (compile bound (first (last pairs))))))
-
-(do :tries-refactoring
+#_(do :tries-refactoring
 
     (defmacro bind0 [& xs]
       `(bind ENV0 ~@(map quote/quote-wrap xs)))
 
-    (bind0 (fn [a b] (+ a b)))
+    (bind0 f (fn [a b] (+ a b)))
 
 
     (cd (bind ENV0 't '(if true :ok :ko))
@@ -712,25 +712,16 @@
         (do :lambda
 
 
-            (build (bind ENV0 '(fn [a] a)))
             (prog ((fn [a b] (+ a b)) 1 2))
-            (compile (bind ENV0 't '((fn [a b] (+ a b)) 1 2))
-                     't)
             (prog f (fn [a b] (+ a b)) (f 1 2)))
-
-        (do :nested-bindings
-
-            #_(prog x 1
-                     y (let [z 3] (+ x z))
-                     (+ y.z x y)))
 
         (do :mac
 
             (prog infix (mac [_ args] (clojure.core/list (second args) (first args) (nth args 2)))
-                   (infix 1 + 2))
+                  (infix 1 + 2))
 
             (prog ((mac [_ args] (clojure.core/list (second args) (first args) (nth args 2)))
-                    1 + 2))
+                   1 + 2))
 
             (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
@@ -741,11 +732,12 @@
                             (bind e 'this this-value (first args)))
                   (m (list this)))
 
-            #_ (prog m (mac [e args] (build
-                                       (bind (bind e 'this :this)
-                                             (first args))
-                                       DEFAULT_COMPILER_OPTS))
-                      (m this)))
+            (build (cd (bind ENV0
+                          'this-value 4
+                          'm '(binder [e args]
+                                      (bind e 'this this-value (first args)))
+                          'ret '(m (list this)))
+                       'ret)))
 
         (do :quote
 
@@ -804,11 +796,11 @@
                    (one.add 4)))
 
         (do :unquote
-            (bind ENV0 '~(+ 1 2))
+            (bind ENV0 'x '~(+ 1 2))
             (prog x ~(+ 1 2)
                    x))
 
         (do :control
 
-            (bind ENV0 '(? (pos? 1) :ok :ko))
+            (bind ENV0 'x '(? (pos? 1) :ok :ko))
             (prog (? (pos? 1) :ok :ko)))))

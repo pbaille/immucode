@@ -73,8 +73,8 @@
 
 (defn children [tree]
   (if-let [node (::node tree)]
-    (mapv (comp (partial cd tree) vector)
-          (sort-by str (keys node)))))
+    (mapv (fn [k] (cd tree [k]))
+          (keys node))))
 
 (do :show
 

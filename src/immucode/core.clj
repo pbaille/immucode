@@ -153,6 +153,13 @@
                 () (map deps children))
         ()))))
 
+(defn transitive-deps [env]
+  (loop [ret () todo (deps env)]
+    (if (seq todo)
+      (let [nxt (reduce deps-merge ret (map deps todo))]
+        (recur nxt (remove (set ret) nxt)))
+      ret)))
+
 (defn build
   [env]
   (if (contains? env :value) ; handling falsy values

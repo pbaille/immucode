@@ -1,4 +1,5 @@
 (ns immucode.core
+  (:refer-clojure :exclude [compile])
   (:require [immucode.path :as path]
             [immucode.tree :as tree]
             [immucode.utils :as u :refer [cp]]
@@ -86,7 +87,9 @@
          bound (reduce (fn [env [sym expr]] (bind env sym expr))
                        env bindings)]
      (if return
-       (bind bound return)
+       (let [return-symbol (gensym "ret_")]
+         (-> (bind bound return-symbol return)
+             (bind return-symbol)))
        bound))))
 
 (defn evaluate
@@ -247,7 +250,6 @@
         (list 'let (vec bindings) return)
         return))))
 
-(resolve 'clojure.core/list)
 (def ENV0
 
   (-> {}
@@ -496,16 +498,13 @@
 
                  :bind
                  (fn [env [test then else]]
-                   (-> (bind env
-                          0 test
-                          1 then
-                          2 else)
-                       (assoc
-                        :if (list 'if test then else)
-                        :build
-                        (fn [env]
-                          (cons 'if
-                                (map build (tree/children env)))))))})
+                   (-> (bind env 0 test 1 then 2 else)
+                       (assoc :if (list 'if test then else)
+                              :build
+                              (fn [env]
+                                (->> (tree/children env)
+                                     (map build)
+                                     (cons 'if))))))})
 
       (tree/put '[?]
                 {:interpret
@@ -525,12 +524,12 @@
                    (if (composite/composed? xs)
                      (bind env (composite/expand-vec xs))
                      (-> (reduce (fn [e [i v]] (bind e [i] v))
-                              (assoc env :vector true :indexed (count xs))
-                              (map-indexed vector xs))
-                         (assoc
-                          :build
-                          (fn [env]
-                            (mapv build (tree/children env)))))))})
+                                 (assoc env :vector true)
+                                 (map-indexed vector xs))
+                         (assoc :build
+                                (fn [env]
+                                  (->> (tree/children env)
+                                       (mapv build)))))))})
 
       (tree/put '[map-entry]
                 {:interpret
@@ -553,8 +552,8 @@
                      (if (composite/composed? hm)
                        (bind env (composite/expand-map hm))
                        (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
-                                (assoc env :hash-map true :indexed (count xs))
-                                (map-indexed vector xs))
+                                   (assoc env :hash-map true :indexed (count xs))
+                                   (map-indexed vector xs))
                            (assoc
                             :build
                             (fn [env]
@@ -738,18 +737,9 @@
             (bind ENV0 'm '(binder [e _] e))
 
             (prog this-value 4
-                   m (binder [e args] (bind
-                                       (bind
-                                        (bind e 'this this-value)
-                                        'return (first args))
-                                       'return))
-                   (m (list this)))
-
-            #_(prog this-value 4
-                   m (binder [e args] (bind
-                                       (bind e 'this this-value)
-                                       (first args)))
-                   (m (list this)))
+                  m (binder [e args]
+                            (bind e 'this this-value (first args)))
+                  (m (list this)))
 
             #_ (prog m (mac [e args] (build
                                        (bind (bind e 'this :this)

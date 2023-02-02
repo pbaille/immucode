@@ -71,7 +71,10 @@
      (cp expr
 
          symbol? (if-let [found (bubfind env expr)]
-                   (assoc env :link (tree/position found))
+                   (let [at (tree/position env)
+                         target (update found :referenced-by conj at)]
+                     (-> (tree/at target at)
+                         (assoc :link (tree/position target))))
                    (bind env (list 'external expr)))
 
          seq? (if-let [f (-> (bind env (first expr))

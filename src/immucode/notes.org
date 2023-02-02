@@ -16,17 +16,17 @@ should we use hashes ?
 if I do not allow env member overides, I can safely bind to a path and be sure that the value will always be the same
 it seems to work well
 *** todo
-- fn and let
-- recursive fn
+- [X] fn and let
+- [X] recursive fn
 ** <2023-01-22 Sun>
 the base is here: let, lambdas, macros, if, recursion
 *** todo
-- collections
-- destructuration
-- generic functions
-- quasiquote
-- modules
-- effects
+- [X] collections
+- [X] destructuration
+- [X] generic functions
+- [X] quasiquote
+- [X] modules
+- [ ] effects
 ** <2023-01-24 Tue>
 the bind thing seems to be really powerful
 because it let you return one value in its context
@@ -63,7 +63,66 @@ define a set of functions that have to be here on the host plateform
 It should also be able to provide type informations for the inference macanism
 *** dispatch
 **** runtime
-bring back =question-mark= macro code
+- [X] bring back =question-mark= macro code
 **** compile-time
-- the =multi-fn.simple= bind function let you choose a dispatch at bind time
+- [X] the =multi-fn.simple= bind function let you choose a dispatch at bind time
 - a chain of binding functins that can fail returning nil could be handy too
+** <2023-01-29 Sun>
+*** destructuration and bindings
+- top level destructuration (in =bind=) ??
+- [X] destructured bindings are processed by the =destructure/bindings= function
+  a flat vector of bindings is returned, therfore we are losing track of the actual pattern
+  it should be valuable to keep track of it for source-mapping (debug or error throwing)
+  at bind time time, the evaluate mode can be used by unquoting some expressions, it can serve as a quick way to debug some expression.
+- [X] =let1= ?? to handle destructuration. =let= bindings will be hold in env indexed.
+** <2023-01-30 Mon>
+*** binding if
+sometimes test result can be determined at bind time and a branch can be selected
+as a simple exemple: if the test is =(vector? x)= and x is known to be a vector, the else branch is discarded at bind time
+bind time dispatch can be realised this way maybe (=multi-fn.simple=)
+*** types
+should try to add some simply type functions that will be able to throw meaningful bind time error
+will begin with some commonly used clojure functions.
+type system will be quite complicated since it implies some kind of chain reaction
+if one node refine the type of its parent this information has to be forwarded to nodes that depend on the parent that can refine it back etc...
+we will have to find the fixpoint of the type refinement propagation
+
+Does the binders have to keep track of all nodes that were bound by it ?
+** <2023-01-31 Tue>
+There is an inconstitency in the usage of the =:return= key between lambda and let
+*** todo
+ - [X] lambda bind should return a binding node
+ - [X] let should hold a =:link= key to its return expression
+ - [X] build should be a node method like bind and evaluate
+ - [X] external symbols could declared instead of being resolved in bind (because clojure should not be assumed as the host)
+ - [X] locals are treated differently in bind, is it really necessary ?
+ - [X] application binding (forms from which the first member is not a binder) could have their builtin binder (that handle the composite expansion)
+
+- [X] refactoring
+
+   (a method is a tree node entry like =:bind=)
+
+   - build -> =:compile= method (stored as =:compiled=)
+   - evaluate(2,3) -> =:interpret= method (results could be stored in an =:output= hash-map)
+   - evaluate(1) -> =:evaluate= method (stored as =:value=)
+   - =:deps= node field computed at bind time
+
+   this will result in smaller base functions (=bind= =evaluate= =build=)
+
+*** mmmm
+interpret and build should return environments too
+this way we can store results in the envs while eventually altering it
+in build it seems nice to keep track of dependencies and get rid of build-state
+
+** <2023-02-02 Thu>
+the refactoring is almost done
+the env returning versions of interpret and build have been abandonned
+*** todo
+- [X] remove the sort-by str from tree/children
+  further sorting or filtering will be done via the :name key
+- [X] dedicated keys of the tree ns should be namespaced in order to avoid conflicts (it uses a :name key...)
+- [X] handle sequential nodes children differently (in s-expr and if)
+  because it can introduce some weird behavior when for some reason an indexed node contains other bindings
+*** types again
+in the =if= form (which is used for shorcircuiting bindings in =let=) the test expression can provide type refinements to its branches
+how a type refinement should be propagated ?

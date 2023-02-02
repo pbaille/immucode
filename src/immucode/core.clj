@@ -176,18 +176,6 @@
       (list 'let (vec bindings) (build env))
       (build env))))
 
-(declare ENV0)
-
-(defmacro prog
-  [& body]
-  (if (even? (count body))
-    (u/throw [::prog "no return expression." (cons `prog body)])
-    (let [[pairs return] (pairs&return body)
-          return-symbol (gensym "ret_")
-          bindings (conj (vec pairs) [return-symbol return])
-          bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
-      (compile (cd bound return-symbol)))))
-
 (def ENV0
 
   (-> {}
@@ -522,6 +510,16 @@
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
                              (map-indexed vector implementations))))})))
+
+(defmacro prog
+  [& body]
+  (if (even? (count body))
+    (u/throw [::prog "no return expression." (cons `prog body)])
+    (let [[pairs return] (pairs&return body)
+          return-symbol (gensym "ret_")
+          bindings (conj (vec pairs) [return-symbol return])
+          bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
+      (compile (cd bound return-symbol)))))
 
 #_(do :tries-refactoring
 

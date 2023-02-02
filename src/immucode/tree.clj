@@ -8,15 +8,15 @@
   (if (empty? path)
     tree
     (let [s (first path)]
-      (when-let [subtree (get-in tree [:node s])]
-        (cd (assoc subtree :parent tree :name s)
+      (when-let [subtree (get-in tree [::node s])]
+        (cd (assoc subtree ::parent tree ::name s)
             (next path))))))
 
 (defn parent
-  [{:as tree :keys [parent name]}]
+  [{:as tree ::keys [parent name]}]
   (when parent
-    (assoc-in parent [:node name]
-              (dissoc tree :parent :name))))
+    (assoc-in parent [::node name]
+              (dissoc tree ::parent ::name))))
 
 (defn nth-ancestor
   [tree n]
@@ -40,7 +40,7 @@
         (find (parent tree) path))))
 
 (defn position
-  [{:as _tree :keys [parent name]}]
+  [{:as _tree ::keys [parent name]}]
   (if parent
     (conj (position parent) name)
     []))
@@ -51,7 +51,7 @@
       (nth-ancestor (count path))))
 
 (defn subnode-path [path]
-  (interleave (repeat :node) path))
+  (interleave (repeat ::node) path))
 
 (defn ensure-path
   [tree path]
@@ -72,7 +72,7 @@
    (reduce (fn [e [k v]] (put e path k v)) tree m)))
 
 (defn children [tree]
-  (if-let [node (:node tree)]
+  (if-let [node (::node tree)]
     (mapv (comp (partial cd tree) vector)
           (sort-by str (keys node)))))
 
@@ -80,13 +80,13 @@
 
     (defn- remove-parents
       [tree]
-      (-> (dissoc tree :parent :name)
-          (update :node u/$vals remove-parents)))
+      (-> (dissoc tree ::parent ::name)
+          (update ::node u/$vals remove-parents)))
 
     (defn show
       [tree]
       (-> (remove-parents tree)
-          (assoc :at (position tree))))
+          (assoc ::at (position tree))))
 
     (defn ppr [tree] (u/ppr (show tree))))
 

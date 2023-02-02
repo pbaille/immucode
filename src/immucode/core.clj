@@ -49,7 +49,13 @@
         [(partition 2 xs) nil]))
 
     (defn deps-merge [old new]
-      (concat new (remove (set new) old))))
+      (concat new (remove (set new) old)))
+
+    (defn sequential-children
+      [env]
+      (->> (tree/children env)
+           (filter (comp int? ::tree/name))
+           (sort-by ::tree/name))))
 
 (defn bind
 
@@ -311,7 +317,7 @@
                          (assoc
                           :build
                           (fn s-expr-instance-build [env]
-                            (map build (tree/children env)))))))})
+                            (map build (sequential-children env)))))))})
       ;; let
       (tree/put '[let1]
                 {:interpret
@@ -511,7 +517,7 @@
                        (assoc :if (list 'if test then else)
                               :build
                               (fn [env]
-                                (->> (tree/children env)
+                                (->> (sequential-children env)
                                      (map build)
                                      (cons 'if))))))})
 
@@ -537,7 +543,7 @@
                                  (map-indexed vector xs))
                          (assoc :build
                                 (fn [env]
-                                  (->> (tree/children env)
+                                  (->> (sequential-children env)
                                        (mapv build)))))))})
 
       (tree/put '[map-entry]
@@ -566,8 +572,8 @@
                            (assoc
                             :build
                             (fn [env]
-                              (into {} (map (fn [e] (mapv build (tree/children e)))
-                                            (tree/children env)))))))))})
+                              (into {} (map (fn [e] (mapv build (sequential-children e)))
+                                            (sequential-children env)))))))))})
 
       ;; multi functions
       (tree/put '[multi-fn simple]
@@ -585,13 +591,13 @@
                                     :predicates predicates
                                     :bind (fn [env2 args]
                                             (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                  subenvs (next (tree/children returned-env))
+                                                  subenvs (next (sequential-children returned-env))
                                                   arg-check (fn [check arg] (or (= '_ check) (check arg)))
                                                   match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
                                               (loop [candidates (map-indexed vector predicates)]
                                                 (if-let [[[idx pred] & cs] (seq candidates)]
                                                   (if (match? pred subenvs)
-                                                    (assoc-in returned-env [::node 0]
+                                                    (assoc-in returned-env [::tree/node 0]
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))

@@ -142,22 +142,20 @@
                (path/path at) "from:"
                (tree/position env)]))))
 
-(defn deps
+(defn outer-links
+  "return all links pointing outside the current node"
   [env]
-  (if-let [link (:link env)]
-    (append1 (deps (tree/at env link)) link)
-    (if-let [deps-fn (:deps env)]
-      (deps-fn env)
-      (if-let [children (tree/children env)]
-        (reduce deps-merge
-                () (map deps children))
-        ()))))
+  (if-let [target (:link env)]
+    (list target)
+    (remove (partial path/parent-of (tree/position env))
+            (reduce deps-merge () (map outer-links (tree/children env))))))
 
 (defn transitive-deps [env]
-  (loop [ret () todo (deps env)]
+  (loop [ret () todo (outer-links env)]
     (if (seq todo)
-      (let [nxt (reduce deps-merge ret (map deps todo))]
-        (recur nxt (remove (set ret) nxt)))
+      (let [next-ret (deps-merge ret todo)
+            next-todo (reduce deps-merge () (map (comp outer-links (partial tree/at env)) todo))]
+        (recur next-ret (remove (set next-ret) next-todo)))
       ret)))
 
 (defn build
@@ -181,7 +179,7 @@
     (compile env)
 
     (if-let [bindings
-             (some->> (seq (deps env))
+             (some->> (seq (transitive-deps env))
                       (mapcat (fn [p] [(path->binding-symbol p) (build (tree/at env p))])))]
       (list 'let (vec bindings) (build env))
       (build env))))
@@ -250,9 +248,7 @@
                  (fn let1-bind
                    [env [[pattern expr] return :as args]]
 
-                   (let [at (tree/position env)
-
-                         return-symbol '__return__
+                   (let [return-symbol '__return__
 
                          bindings
                          (partition 2 (destructure/bindings pattern expr {}))
@@ -269,12 +265,6 @@
 
                          (assoc
                           :let1 (cons 'let1 args)
-                          :deps
-                          (fn let1-instance-deps [env]
-                            (remove (partial path/parent-of at)
-                                    (reduce deps-merge
-                                            () (map deps (tree/children env)))))
-
                           :build
                           (fn let1-instance-build [env]
                             (let [bindings
@@ -350,12 +340,6 @@
                                return-expression)
 
                          (assoc
-                          :deps
-                          (fn lambda-instance-deps [env]
-                            (remove (partial path/parent-of position)
-                                    (reduce deps-merge
-                                            () (map deps (tree/children env)))))
-
                           :build
                           (fn lambda-instance-build [env]
                             (let [return (build (tree/at env return-path))]
@@ -415,7 +399,8 @@
 
       (tree/put '[qt]
                 {:interpret
-                 (fn [_ _] (u/throw [:qt.evaluate :not-implemented]))
+                 (fn [env [content]]
+                   (interpret env (quote/quote-fn 0 content)))
 
                  :bind
                  (fn [env [content]]
@@ -485,13 +470,14 @@
                      (if (composite/composed? hm)
                        (bind env (composite/expand-map hm))
                        (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
-                                   (assoc env :hash-map true :indexed (count xs))
+                                   (assoc env :hash-map true)
                                    (map-indexed vector xs))
                            (assoc
                             :build
                             (fn [env]
-                              (into {} (map (fn [e] (mapv build (sequential-children e)))
-                                            (sequential-children env)))))))))})
+                              (->> (sequential-children env)
+                                   (map (fn [e] (mapv build (sequential-children e))))
+                                   (into {}))))))))})
 
       ;; multi functions
       (tree/put '[multi-fn simple]
@@ -521,15 +507,23 @@
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
                              (map-indexed vector implementations))))})))
 
-(defmacro prog
-  [& body]
+(defn bind-prog
+  [body]
   (if (even? (count body))
     (u/throw [::prog "no return expression." (cons `prog body)])
     (let [[pairs return] (pairs&return body)
           return-symbol (gensym "ret_")
           bindings (conj (vec pairs) [return-symbol return])
           bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
-      (compile (cd bound return-symbol)))))
+      (cd bound return-symbol))))
+
+(defmacro prog
+  [& body]
+  (compile (bind-prog body)))
+
+(defmacro prog'
+  [& body]
+  `(bind-prog ~(mapv quote/quote-wrap body)))
 
 #_(do :tries-refactoring
 
@@ -629,17 +623,22 @@
 
         (do :simple
 
-            (prog x 1 y 2 (+ x y))
+
+            (transitive-deps
+             (prog' x 1 y 2 (+ x y)))
+
+            (compile
+             (prog' x 1 y x (+ y y)))
 
             (prog (let [x 1 y 2] (+ y x)))
 
             (prog (let [x 1 y 3]
-                     (let [z 5]
-                       (+ x y z))))
+                    (let [z 5]
+                      (+ x y z))))
 
             (prog x 1
-                   f (fn [a b] (let [y 4] (+ x y a b)))
-                   (f 4 5))
+                  f (fn [a b] (let [y 4] (+ x y a b)))
+                  (f 4 5))
 
             (prog x 1 y x (+ y y)))
 
@@ -663,15 +662,8 @@
 
             (prog this-value 4
                   m (binder [e args]
-                            (bind e 'this this-value (first args)))
-                  (m (list this)))
-
-            (build (cd (bind ENV0
-                          'this-value 4
-                          'm '(binder [e args]
-                                      (bind e 'this this-value (first args)))
-                          'ret '(m (list this)))
-                       'ret)))
+                            (bind e (qt (let [this ~this-value] ~(first args)))))
+                  (m (list this))))
 
         (do :quote
 
@@ -682,57 +674,57 @@
 
             (prog (if true :ok :ko))
             (prog (if (= 1 ((fn [a] a) 2))
-                     (let [x 1 y 2] (+ x y))
-                     'ko)))
+                    (let [x 1 y 2] (+ x y))
+                    'ko)))
 
         (do :recursion
 
             (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
             (prog f (fn [x] (if (pos? x) (f (dec x)) :done))
-                   (f 10)))
+                  (f 10)))
 
         (do :collection
             (prog x 1 y 2 [x y])
             (prog x 1 y :foo {y x})
             (prog xs (range 3)
-                   [:op . xs])
+                  [:op . xs])
             (prog x 1 y :foo z {y x}
-                   {:a 3 . z}))
+                  {:a 3 . z}))
 
         (do :multi-fn
             (prog mf (multi-fn.simple [x y]
-                                       [:number :number] (+ x y)
-                                       [:string :string] (str x y))
-                   n (mf 1 2)
-                   s (mf "io " "gro.")
-                   [n s]))
+                                      [:number :number] (+ x y)
+                                      [:string :string] (str x y))
+                  n (mf 1 2)
+                  s (mf "io " "gro.")
+                  [n s]))
 
         (do :destructure
             (prog (let [[x . xs] (range 10)]
-                     [x xs]))
+                    [x xs]))
 
             (prog (let [{:a a . m} {:a 1 :b 2 :c 3}]
-                     [a m]))
+                    [a m]))
 
             (prog f (fn [x [a b c]] (+ x a b c))
-                   (f 1 [2 3 4])))
+                  (f 1 [2 3 4])))
 
         (do :modules
 
             (prog math (module add (fn [x y] (+ x y))
-                                sub (fn [x y] (- x y)))
-                   (math.add 1 2))
+                               sub (fn [x y] (- x y)))
+                  (math.add 1 2))
 
             (prog num (module [x]
-                               add (fn [y] (+ x y))
-                               sub (fn [y] (- x y)))
-                   one (num 1)
-                   (one.add 4)))
+                              add (fn [y] (+ x y))
+                              sub (fn [y] (- x y)))
+                  one (num 1)
+                  (one.add 4)))
 
         (do :unquote
             (bind ENV0 'x '~(+ 1 2))
             (prog x ~(+ 1 2)
-                   x))
+                  x))
 
         (do :control
 

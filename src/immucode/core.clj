@@ -147,15 +147,21 @@
   [env]
   (if-let [target (:link env)]
     (list target)
-    (remove (partial path/parent-of (tree/position env))
-            (reduce deps-merge () (map outer-links (tree/children env))))))
+    (->> (map outer-links (tree/children env))
+         (reduce deps-merge ())
+         (remove (partial path/parent-of (tree/position env))))))
 
-(defn transitive-deps [env]
+(defn transitive-deps
+  [env]
   (loop [ret () todo (outer-links env)]
     (if (seq todo)
-      (let [next-ret (deps-merge ret todo)
-            next-todo (reduce deps-merge () (map (comp outer-links (partial tree/at env)) todo))]
-        (recur next-ret (remove (set next-ret) next-todo)))
+      (let [next-ret (deps-merge ret todo)]
+        (recur next-ret
+               (->> todo
+                    (map (partial tree/at env))
+                    (map outer-links)
+                    (reduce deps-merge ())
+                    (remove (set next-ret)))))
       ret)))
 
 (defn build
@@ -180,7 +186,8 @@
 
     (if-let [bindings
              (some->> (seq (transitive-deps env))
-                      (mapcat (fn [p] [(path->binding-symbol p) (build (tree/at env p))])))]
+                      (mapcat (fn [p] [(path->binding-symbol p)
+                                      (build (tree/at env p))])))]
       (list 'let (vec bindings) (build env))
       (build env))))
 
@@ -188,6 +195,7 @@
 
   (-> {}
 
+      ;; base
       (tree/put '[value]
                 {:bind
                  (fn [env [v]]
@@ -234,6 +242,7 @@
                           :build
                           (fn s-expr-instance-build [env]
                             (map build (sequential-children env)))))))})
+
       ;; let
       (tree/put '[let1]
                 {:interpret
@@ -387,7 +396,10 @@
       (tree/put '[binder]
                 {:bind
                  (fn [env [argv return]]
-                   (assoc env :bind (interpret env (list 'fn argv return))))})
+                   (let [f (interpret env (list 'fn argv return))]
+                     (assoc env
+                            :interpret (comp evaluate f)
+                            :bind f)))})
 
       ;; quote
       (tree/put '[quote]
@@ -524,39 +536,6 @@
 (defmacro prog'
   [& body]
   `(bind-prog ~(mapv quote/quote-wrap body)))
-
-#_(do :tries-refactoring
-
-    (defmacro bind0 [& xs]
-      `(bind ENV0 ~@(map quote/quote-wrap xs)))
-
-    (bind0 f (fn [a b] (+ a b)))
-
-
-    (cd (bind ENV0 't '(if true :ok :ko))
-        't)
-    (prog (let [x 1 y x]  (+ x y)))
-    (prog (let [x 1 f (fn [y] (+ x y))]  (f 3)))
-    (prog x 1 (+ x x))
-    (prog x 1 f (fn [y] (+ 7 y))  (f 3))
-    (prog x 1 f (fn [y] (+ x y))  (f 3))
-    (prog f (fn [a b] (+ a b)) (f 2 3))
-
-    (bind ENV0 'x 1 'y 'x)
-    (compile (bind ENV0 'x 1 'y 'x 'y) 'y)
-    (deps (cd (bind ENV0 'ret '(let1 [x 1] x))
-              'ret))
-    (compile (bind ENV0 'ret '(let1 [x 1] (let1 [y x] y)))
-             'ret)
-    (compile (bind ENV0 'ret '(let [x 1 y x] y))
-             'ret)
-
-    (let [e (tree/put ENV0 '[+] {:value +})]
-      (bind e 'ret '(let [x 1 y x] (+ y 5))))
-
-    (let [e (tree/put ENV0 '[+] {:value `+})]
-      (compile (bind e 'ret '(let [x (+ 1 2 3) y x] (+ y 5)))
-               'ret)))
 
 (do :tries
 

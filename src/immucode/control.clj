@@ -3,10 +3,28 @@
             [immucode.utils :as u]
             [clojure.string :as str]))
 
+(def DEFAULT_OPTIONS
+  {:bind (fn [a b c] (if (= a b) c (list 'let [a b] c)))
+   :check identity
+   :throw (fn [e] (list `u/throw e))})
+
+(defn options [& {:as m}]
+  (let [{:as opts :keys [check branch]}
+        (merge DEFAULT_OPTIONS (eval m))]
+    (assoc opts
+           :branch (or branch
+                       (fn [p t e]
+                         (list 'if (check p) t e))))))
+
 (defn pairs&return [xs]
-      (if (odd? (count xs))
-        [(partition 2 (butlast xs)) (last xs)]
-        [(partition 2 xs) nil]))
+  (if (odd? (count xs))
+    [(partition 2 (butlast xs)) (last xs)]
+    [(partition 2 xs) nil]))
+
+(defn options&body [[x & xs]]
+  (if (map? x)
+    [(options x) xs]
+    [(options) (cons x xs)]))
 
 ;; thunk : lambda of zero argument
 ;; TODO use thunks only when needed (better performances)
@@ -19,10 +37,10 @@
   [{:as   this
     :keys [test bindings return next]}
    {:as options
-    :keys [binder checker thrower]}]
+    :keys [branch bind throw]}]
   (let [skip (when next (list next))]
     (cond
-      test (list 'if (checker test) return skip)
+      test (branch test return skip)
       bindings (let [[b1 b2 & bs] bindings
                      return (compile-case (assoc this :bindings bs) options)]
 
@@ -30,16 +48,16 @@
                               :short-circuiting)
 
                    :optional
-                   (binder b1 b2 return)
+                   (bind b1 b2 return)
 
                    :short-circuiting
-                   (binder b1 b2
-                           (list 'if (checker b1) return skip))
+                   (bind b1 b2
+                         (branch b1 return skip))
 
                    :strict
-                   (binder b1 b2
-                           (list 'if (checker b1) return
-                                 (thrower [::strict-binding [b1 b2]])))))
+                   (bind b1 b2
+                         (branch b1 return
+                                 (throw [::strict-binding [b1 b2]])))))
       :else return)))
 
 (defn- cases->thunks
@@ -63,7 +81,7 @@
              :next     (when-not bottom? nxt)
              :test     (if-not (or bindings? bottom?) left)
              :bindings (when bindings? (destructure/bindings left options))}))
-        (u/prob (parse body))
+        (parse body)
         (partition 2 1 (thunk-symbols))))
 
 (defn emit-form
@@ -76,17 +94,28 @@
         (list 'let bindings return))
       return)))
 
-(def DEFAULT_OPTIONS
-  {:binder (fn [a b c] (list 'let [a b] c))
-   :checker identity
-   :thrower (fn [e] (list `u/throw e))})
-
 (defmacro ?
   ""
-  [x & xs]
-  (let [[options body] (if (map? x) [x xs] [{} (cons x xs)])]
-       (emit-form body
-                  (merge DEFAULT_OPTIONS options))))
+  [& xs]
+  (let [[options body] (options&body xs)]
+       (emit-form body options)))
+
+(defmacro OR [& xs]
+  (let [[{:keys [branch bind]} body] (options&body xs)]
+    (reduce (fn [a e]
+              (if (symbol? e)
+                (branch e e a)
+                (let [s (gensym)]
+                  (bind s e (branch s s a)))))
+            (reverse body))))
+
+(defmacro AND [& xs]
+  (let [[{:keys [branch]} body] (options&body xs)]
+    (reduce (fn [a e] (branch e a nil))
+            (reverse body))))
+
+
+
 
 
 
@@ -135,7 +164,11 @@
 
 (comment :scratch
 
-         ()
+         (macroexpand-1 '(or a b c))
+         (macroexpand-1 '(OR a (b o n) c))
+         (macroexpand-1 '(AND {:check (partial list 'test)}
+                              (e x p) b c))
+
          (macroexpand-1 '(? (pos? 1) :ok))
 
          (macroexpand-1 '(? [a (get m :a)]

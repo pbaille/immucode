@@ -3,9 +3,13 @@
             [immucode.utils :as u]
             [clojure.string :as str]))
 
-;; TODO use thunks only when needed (better performances)
+(defn pairs&return [xs]
+      (if (odd? (count xs))
+        [(partition 2 (butlast xs)) (last xs)]
+        [(partition 2 xs) nil]))
 
 ;; thunk : lambda of zero argument
+;; TODO use thunks only when needed (better performances)
 
 (defn- thunk-symbols
   "generating symbols to hold case thunks"
@@ -13,44 +17,44 @@
 
 (defn- compile-case
   [{:as   this
-    :keys [test bindings return next]}]
+    :keys [test bindings return next]}
+   {:as options
+    :keys [binder checker thrower]}]
   (let [skip (when next (list next))]
     (cond
-      test (list 'if test return skip)
+      test (list 'if (checker test) return skip)
       bindings (let [[b1 b2 & bs] bindings
-                     return (compile-case (assoc this :bindings bs))]
+                     return (compile-case (assoc this :bindings bs) options)]
 
                  (case (:mode (meta b1)
                               :short-circuiting)
 
                    :optional
-                   (list 'let [b1 b2]
-                         return)
+                   (binder b1 b2 return)
 
                    :short-circuiting
-                   (list 'let [b1 b2]
-                         (list 'if b1 return skip))
+                   (binder b1 b2
+                           (list 'if (checker b1) return skip))
 
                    :strict
-                   (list 'let [b1 b2]
-                         (list 'if b1 return
-                               `(u/throw [::strict-binding ['~b1 '~b2]])))))
+                   (binder b1 b2
+                           (list 'if (checker b1) return
+                                 (thrower [::strict-binding [b1 b2]])))))
       :else return)))
 
 (defn- cases->thunks
-  [cases]
+  [cases options]
   (mapv (fn [case]
-          [(:symbol case) (list 'fn [] (compile-case case))])
+          [(:symbol case) (list 'fn [] (compile-case case options))])
         cases))
 
-(defn- normalize-body
+(defn- parse
   [body]
-  (if (odd? (count body))
-    (concat (butlast body) [::bottom (last body)])
-    (concat body [::bottom nil])))
+  (let [[pairs return] (pairs&return body)]
+    (conj (vec pairs) [::bottom return])))
 
 (defn- body->cases
-  [body]
+  [body options]
   (mapv (fn [[left right] [sym nxt]]
           (let [bindings? (vector? left)
                 bottom? (= ::bottom left)]
@@ -58,24 +62,31 @@
              :symbol   sym
              :next     (when-not bottom? nxt)
              :test     (if-not (or bindings? bottom?) left)
-             :bindings (when bindings? (destructure/bindings left {}))}))
-        (partition 2 (normalize-body body))
+             :bindings (when bindings? (destructure/bindings left options))}))
+        (u/prob (parse body))
         (partition 2 1 (thunk-symbols))))
 
 (defn emit-form
-  [body]
-  (let [cases (body->cases body)
-        return (compile-case (first cases))]
+  [body options]
+  (let [cases (body->cases body options)
+        return (compile-case (first cases) options)]
     (if (next cases)
-      (let [bindings (->> (cases->thunks (next cases))
+      (let [bindings (->> (cases->thunks (next cases) options)
                           reverse (mapcat identity) vec)]
         (list 'let bindings return))
       return)))
 
+(def DEFAULT_OPTIONS
+  {:binder (fn [a b c] (list 'let [a b] c))
+   :checker identity
+   :thrower (fn [e] (list `u/throw e))})
+
 (defmacro ?
   ""
-  [& body]
-  (emit-form body))
+  [x & xs]
+  (let [[options body] (if (map? x) [x xs] [{} (cons x xs)])]
+       (emit-form body
+                  (merge DEFAULT_OPTIONS options))))
 
 
 
@@ -124,6 +135,7 @@
 
 (comment :scratch
 
+         ()
          (macroexpand-1 '(? (pos? 1) :ok))
 
          (macroexpand-1 '(? [a (get m :a)]

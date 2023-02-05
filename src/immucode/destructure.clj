@@ -56,25 +56,27 @@
 
 
     (defn raw-map [x seed options]
-      (u/with-gensyms
-        [mapcheck seedsym]
-        (u/concatv
-         (bindings
-          [seedsym seed
-           mapcheck `(map? ~seedsym)]
-          options)
-         (map-keys x seedsym options))))
+      (let [symseed? (symbol? seed)]
+        (u/with-gensyms
+          [mapcheck seedsym]
+          (let [seedsym (if symseed? seed seedsym)]
+            (u/concatv
+             (when-not symseed? (bindings [seedsym seed] options))
+             (bindings [mapcheck `(map? ~seedsym)] options)
+             (map-keys x seedsym options))))))
 
     (defn composite-map [x seed options]
       (let [rs (get x '.)
             m (dissoc x '.)
-            ks (keys m)]
+            ks (keys m)
+            symseed? (symbol? seed)]
         (u/with-gensyms
           [seedsym]
-          (u/concatv
-           (bindings [seedsym seed] options)
-           (map-keys m seedsym options)
-           (bindings rs `(dissoc ~seedsym ~@ks) options))))))
+          (let [seedsym (if symseed? seed seedsym)]
+            (u/concatv
+             (when-not symseed? (bindings [seedsym seed] options))
+             (map-keys m seedsym options)
+             (bindings rs `(dissoc ~seedsym ~@ks) options)))))))
 
 (do :sym
 
@@ -175,10 +177,18 @@
 
        seq?
        (let [[v & args] x]
-         (if-let [k (and (symbol? v) (keyword v))]
-           (if-let [op (get (merge operators (:operators options)) k)]
-             (op args seed options)))))))
+         (cond (symbol? v)
+               (if-let [op (get (merge operators (:operators options)) (keyword v))]
+                 (op args seed options)
+                 (u/throw [::bindings "unknown operator" v]))
+               (keyword? v)
+               (bindings (list '&
+                               (first args)
+                               {v (or (second args) (symbol (name v)))})
+                         seed
+                         options))))))
 
+(bindings '(:pouet x) 'o {})
 (defn unified
   "takes a binding vector (like let) , compile it with 'bindings
        then add unification constraints on symbols that occurs multiple times"

@@ -37,8 +37,8 @@
   [{:as   this
     :keys [test bindings return next]}
    {:as options
-    :keys [branch bind throw]}]
-  (let [skip (when next (list next))]
+    :keys [branch bind throw default]}]
+  (let [skip (if next (list next) default)]
     (cond
       test (branch test return skip)
       bindings (let [[b1 b2 & bs] bindings
@@ -100,19 +100,27 @@
   (let [[options body] (options&body xs)]
        (emit-form body options)))
 
+
+
+(defn emit-OR [body {:keys [branch bind]}]
+  (reduce (fn [a e]
+            (if (symbol? e)
+              (branch e e a)
+              (let [s (gensym)]
+                (bind s e (branch s s a)))))
+          (reverse body)))
+
+(defn emit-AND [body {:keys [branch default]}]
+  (reduce (fn [a e] (branch e a default))
+          (reverse body)))
+
 (defmacro OR [& xs]
-  (let [[{:keys [branch bind]} body] (options&body xs)]
-    (reduce (fn [a e]
-              (if (symbol? e)
-                (branch e e a)
-                (let [s (gensym)]
-                  (bind s e (branch s s a)))))
-            (reverse body))))
+  (let [[options body] (options&body xs)]
+    (emit-OR body options)))
 
 (defmacro AND [& xs]
-  (let [[{:keys [branch]} body] (options&body xs)]
-    (reduce (fn [a e] (branch e a nil))
-            (reverse body))))
+  (let [[options body] (options&body xs)]
+    (emit-AND body options)))
 
 
 

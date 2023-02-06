@@ -152,7 +152,7 @@
 
 
 
-    (defmacro §
+    (defmacro f?
       "The lambda version of `?`
        A multi case function"
       [& xs]

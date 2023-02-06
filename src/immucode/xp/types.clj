@@ -1,5 +1,6 @@
 (ns immucode.xp.types
-  (:require [immucode.control :refer [?]]))
+  (:require [immucode.control :refer [f? ? AND OR]]
+            [immucode.utils :as u]))
 
 (defn with-proto [x & {:as p}]
   (with-meta x {::proto p}))
@@ -91,9 +92,43 @@
     (assert (contains (union [1 2 3]) (union [1 2 3])))
     (assert (contains (union [1 2 3]) (union [2 3]))))
 
+(defn compose [xs]
+
+  (if (some empty-type? xs)
+
+    EMPTY
+
+    (let [members (vec (filter (complement any-type?) xs))]
+
+      (with-proto {::comp members}
+
+        :intersect
+        (fn [t]
+          (loop [ret t todo members]
+            (if-let [[m & todo] (seq todo)]
+              (let [ret' (intersect ret m)]
+                (if (empty-type? ret')
+                  EMPTY
+                  (recur ret' todo)))
+              ret)))
+
+        :contains
+        (fn [t]
+          (loop [xs members]
+            (if-let [[x & xs] (seq xs)]
+              (and (contains x t)
+                   (recur xs))
+              true)))
+
+        :fits
+        (fn [t]
+          (fits (first members) t))))))
+
 (defn from-pred [name f]
   (with-proto {::pred name}
-    :contains f))
+    :contains
+    (fn [t]
+      (f t))))
 
 (do :checks
 
@@ -110,44 +145,62 @@
                    (= EMPTY (intersect t {:a 1}))
 
                    (= (intersect t (union [[1 2] 4 (range 3)]))
-                      (union [[1 2] (range 3)]))))))
+                      (union [[1 2] (range 3)])))))
 
-(defn compose [xs]
-
-  (if (some empty-type? xs)
-
-    EMPTY
-
-    (let [members (vec (keep (complement any-type?) xs))]
-
-      (with-proto {::comp members}
-
-        :intersect
-        (fn [t]
-          (loop [ret t todo members]
-            (if-let [[m & todo] (seq todo)]
-              (let [ret (intersect t m)]
-                (if (empty-type? ret)
-                  ret
-                  (recur ret todo)))
-              ret)))
-
-        :contains
-        (fn [t]
-          (loop [xs members]
-            (if-let [[x & xs] (seq xs)]
-              (and (contains x t)
-                   (recur xs))
-              true)))
-
-        :fits
-        (fn [t]
-          (loop [xs members]
-            (if-let [[x & xs] (seq xs)]
-              (and (fits x t)
-                   (recur xs))
-              true)))))))
+    (let [vec (from-pred :vec vector?)
+          len3 (from-pred :len3 #(= 3 (count %)))
+          t (compose [vec len3])]
+      (and (intersect t [2 3 4])
+           (every? (comp empty-type? (partial intersect t))
+                   [(range 3) [2 3] 4])
+           (contains vec t))))
 
 (defn tuple [xs]
   (with-proto {::tuple xs}
     ))
+
+
+
+
+
+
+
+
+
+
+(defn zip-check [preds args]
+  (if-let [[p & ps] (seq preds)]
+    (and (p (first args))
+         (zip-check ps (rest args)))
+    true))
+
+(defn dispatcher
+  [cases]
+  (fn [args]
+    (loop [xs cases]
+      (if-let [[x & xs] (seq xs)]
+        (if (zip-check (get x 0) args)
+          (get x 1)
+          (recur xs))
+        (u/throw [::dispatch args])))))
+
+(def contains-cases
+  (list
+   [[::any any?] (fn [_ _ _] true)]
+   [[::void any?] (fn [_ _ _] false)]
+   [[singleton? any?] (fn [_ x y] (= x y))]
+   [[::union ::union] (fn [contains u {xs ::union}] (every? (partial contains u) xs))]
+   [[::union any?] (fn [contains {xs ::union} t] (some (fn [x] (contains x t)) xs))]
+   [[any? singleton?] (fn [_ x y] (= x y))]))
+
+(defn contains-fn [cases]
+  (let [dispatch (dispatcher cases)]
+    (fn self [x y]
+      ((dispatch [x y]) self x y))))
+
+((contains-fn contains-cases)
+ (union [1 2])
+ 1)
+((contains-fn contains-cases)
+ (union [1 2 3])
+ (union [1 2]))

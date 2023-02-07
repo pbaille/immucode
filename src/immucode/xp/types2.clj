@@ -1,5 +1,5 @@
 (ns immucode.xp.types2
-  (:refer-clojure :exclude [type symbol keyword vector list hash-map hash-set])
+  (:refer-clojure :exclude [type boolean float symbol keyword vector-of vector list hash-map hash-set])
   (:require [clojure.core :as c]
             [immucode.utils :as u]))
 
@@ -41,7 +41,9 @@
   (get (proto x) k))
 
 (defn call-method [x k y]
-  ((proto-get x k) x y))
+  (if-let [f (proto-get x k)]
+    (f x y)
+    (u/throw [::call-method ::unfound k x])))
 
 (defn checker [t]
   (let [t (->type t)
@@ -160,36 +162,60 @@
 
 (do :compositions
 
+    (defn covariant-contains-impl
+      [tag key-or-keys]
+      (let [inner-check
+            (if (vector? key-or-keys)
+              (fn [this that]
+                (every? (fn [k] (contains (k this) (k that)))
+                        key-or-keys))
+              (fn [this that]
+                (every? (fn [[a b]] (contains a b))
+                        (c/map c/vector
+                               (key-or-keys this)
+                               (key-or-keys that)))))]
+        (fn [this that]
+          (and (tag that)
+               (inner-check this that)))))
+
     (defn many [t]
       (type {:many true
              :element-type t}
 
             {:contains
-             (fn [this x]
-               (and (:many x)
-                    (contains (:element-type this) (:element-type x))))
-
+             (covariant-contains-impl :many [:element-type])
              :value-check
              (fn many-check [this v]
                (and (coll? v)
                     (every? (checker (:element-type this)) v)))}))
 
+    (defn entry-of [k v]
+      (compose entry
+               (type {:entry true
+                      :key k :val v}
+                     {:value-check
+                      (fn [this x]
+                        (and (member-of (:key this) (key x))
+                             (member-of (:val this) (val x))))
+                      :contains
+                      (covariant-contains-impl :entry [:key :val])})))
+
     (defn vector-of [t]
-      (composition [vector (many t)]))
+      (compose vector (many t)))
     (defn list-of [t]
-      (composition [list (many t)]))
+      (compose list (many t)))
     (defn map-of [k v]
-      (composition [hash-map (many (entry k v))]))
+      (compose hash-map (many (entry-of k v))))
     (defn set-of [t]
-      (composition [hash-set (many t)]))
+      (compose hash-set (many t)))
 
     (defn length [n]
-      (composition [collection
-                    (type {:length true
-                           :value n}
-                          {:value-check
-                           (fn [this x]
-                             (= (:value this) (count x)))})]))
+      (compose collection
+               (type {:length true
+                      :value n}
+                     {:value-check
+                      (fn [this x]
+                        (= (:value this) (count x)))})))
 
     (defn tuple [xs]
       (composition [vector
@@ -199,13 +225,21 @@
                           {:value-check
                            (fn [this x]
                              (every? (fn [[a b]] (contains a b))
-                                     (map c/vector (:members this) x)))})]))
+                                     (map c/vector (:members this) x)))
+                           :contains
+                           (covariant-contains-impl :zip :members)})]))
     )
+
+(do :scratch
+    (entry keyword vector))
 
 (do :checks
 
     (assert (member-of (set-of number)
-                       #{1 2 3}))
+                       #{1 2 3})
+
+            (member-of (tuple [keyword number])
+                       [:ok 1]))
 
     (assert
      (and (contains vector vector)
@@ -213,6 +247,8 @@
           (contains collection hashed)
           (contains (vector-of number) (vector-of integer))
           (contains (map-of atomic number) (map-of string integer))
-          (contains (many integer) (vector-of integer))))
-
-    (= (length 3) (length 3)))
+          (contains (many integer) (vector-of integer))
+          (contains (length 3) (length 3))
+          (contains indexed  (compose vector (length 3)))
+          (contains (tuple [number indexed])
+                    (tuple [integer vector])))))

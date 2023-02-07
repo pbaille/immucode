@@ -13,26 +13,41 @@
             (recur (conj seen x) (conj return x) xs))
           return))))
 
-(defn type [& {:as m}]
-  (with-meta m {::type true}))
+(defn type [data proto]
+  (vary-meta data
+             merge
+             {::type true
+              ::proto proto}))
 
 (defn type? [x]
   (some-> x meta ::type))
 
 (defn singleton [x]
-  (type :singleton true
-        :form [:singleton x]
-        :value x
-        :value-check (fn [this v] (= v (:value this)))))
+  (type {:singleton true
+         :form [:singleton x]
+         :value x}
+        {:value-check
+         (fn [this v] (= v (:value this)))}))
 
 (defn ->type [x]
   (if (type? x)
     x
     (singleton x)))
 
+(defn proto [x]
+  (-> (->type x) meta ::proto))
+
+(defn proto-get [x k]
+  (get (proto x) k))
+
+(defn call-method [x k y]
+  ((proto-get x k) x y))
+
 (defn checker [t]
-  (fn [v]
-    ((:value-check (->type t)) t v)))
+  (let [t (->type t)
+        check (:value-check (proto t))]
+    (fn [v]
+      (check t v))))
 
 (defn member-of [t x]
   ((checker t) x))
@@ -40,9 +55,10 @@
 (do :primitives
 
     (defn primitive-type [form pred]
-      (type :primitive true
-            :form form
-            :value-check (fn [_ v] (pred v))))
+      (type {:primitive true
+             :form form}
+            {:value-check
+             (fn [_ v] (pred v))}))
 
     (def boolean (primitive-type :boolean boolean?))
     (def integer (primitive-type :integer integer?))
@@ -62,14 +78,16 @@
 (do :extremes
 
     (def void
-      (type :form :void
-            :void true
-            :value-check (fn [_ _] false)))
+      (type {:form :void
+             :void true}
+            {:value-check
+             (fn [_ _] false)}))
 
     (def any
-      (type :form :any
-            :any true
-            :value-check (fn [_ _] true))))
+      (type {:form :any
+             :any true}
+            {:value-check
+             (fn [_ _] true)})))
 
 (do :combinators
 
@@ -89,8 +107,8 @@
           (:composition x) (every? (fn [m] (contains m y)) (:members x))
           (:composition y) (some (fn [m] (contains x m)) (:members y))
           (:singleton y) (member-of x (:value y))
-          (:contains x) ((:contains x) x y)
-          (:contained y) ((:contained y) y x))))
+          (proto-get x :contains) (call-method x :contains y)
+          (proto-get y :contained) (call-method y :contained x))))
 
     (defn unite [x y]
       (let [x (->type x) y (->type y)]
@@ -99,9 +117,12 @@
           (contains y x) y
           (:union y) (reduce unite x (:members y))
           (:union x) (update x :members conj y)
-          :else (type :union true
-                      :members [x y]
-                      :value-check (fn union-check [this x] (c/some (fn [m] (member-of m x)) (:members this)))))))
+          :else (type {:union true
+                       :members [x y]}
+                      {:value-check
+                       (fn union-check [this x]
+                         (c/some (fn [m] (member-of m x))
+                                 (:members this)))}))))
 
     (defn union [xs]
       (case (count xs)
@@ -116,9 +137,12 @@
           (contains y x) x
           (:composition y) (reduce compose x (:members y))
           (:composition x) (update x :members conj y)
-          :else (type :composition true
-                      :members [x y]
-                      :value-check (fn [this x] (every? (fn [m] (member-of m x)) (:members this)))))))
+          :else (type {:composition true
+                       :members [x y]}
+                      {:value-check
+                       (fn [this x]
+                         (every? (fn [m] (member-of m x))
+                                 (:members this)))}))))
 
     (defn composition [xs]
       (case (count xs)
@@ -137,18 +161,18 @@
 (do :compositions
 
     (defn many [t]
-      (type :many true
-            :element-type t
+      (type {:many true
+             :element-type t}
 
-            :contains
-            (fn [this x]
-              (and (:many x)
-                   (contains (:element-type this) (:element-type x))))
+            {:contains
+             (fn [this x]
+               (and (:many x)
+                    (contains (:element-type this) (:element-type x))))
 
-            :value-check
-            (fn many-check [this v]
-              (and (coll? v)
-                   (every? (checker (:element-type this)) v)))))
+             :value-check
+             (fn many-check [this v]
+               (and (coll? v)
+                    (every? (checker (:element-type this)) v)))}))
 
     (defn vector-of [t]
       (composition [vector (many t)]))
@@ -161,21 +185,21 @@
 
     (defn length [n]
       (composition [collection
-                    (type :length true
-                          :value n
-                          :value-check
-                          (fn [this x]
-                            (= (:value this) (count x))))]))
+                    (type {:length true
+                           :value n}
+                          {:value-check
+                           (fn [this x]
+                             (= (:value this) (count x)))})]))
 
     (defn tuple [xs]
       (composition [vector
                     (length (count xs))
-                    (type :zip true
-                          :members xs
-                          :value-check
-                          (fn [this x]
-                            (every? (fn [[a b]] (contains a b))
-                                    (map c/vector (:members this) x))))]))
+                    (type {:zip true
+                           :members xs}
+                          {:value-check
+                           (fn [this x]
+                             (every? (fn [[a b]] (contains a b))
+                                     (map c/vector (:members this) x)))})]))
     )
 
 (do :checks

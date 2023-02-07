@@ -162,7 +162,7 @@
 
 (do :compositions
 
-    (defn covariant-contains-impl
+    (defn contains-impl
       [tag key-or-keys]
       (let [inner-check
             (if (vector? key-or-keys)
@@ -183,7 +183,7 @@
              :element-type t}
 
             {:contains
-             (covariant-contains-impl :many [:element-type])
+             (contains-impl :many [:element-type])
              :value-check
              (fn many-check [this v]
                (and (coll? v)
@@ -198,7 +198,7 @@
                         (and (member-of (:key this) (key x))
                              (member-of (:val this) (val x))))
                       :contains
-                      (covariant-contains-impl :entry [:key :val])})))
+                      (contains-impl :entry [:key :val])})))
 
     (defn vector-of [t]
       (compose vector (many t)))
@@ -215,7 +215,9 @@
                       :value n}
                      {:value-check
                       (fn [this x]
-                        (= (:value this) (count x)))})))
+                        (member-of (:value this) (count x)))
+                      :contains
+                      (contains-impl :length [:value])})))
 
     (defn tuple [xs]
       (composition [vector
@@ -224,22 +226,41 @@
                            :members xs}
                           {:value-check
                            (fn [this x]
-                             (every? (fn [[a b]] (contains a b))
+                             (every? (fn [[a b]] (member-of a b))
                                      (map c/vector (:members this) x)))
                            :contains
-                           (covariant-contains-impl :zip :members)})]))
+                           (contains-impl :zip :members)})]))
     )
 
+(do :extras
+
+    (defn integer-range [min max]
+      (compose integer
+               (type {:range true
+                      :min min
+                      :max max}
+                     {:value-check
+                      (fn [this x]
+                        (and (>= x (:min this))
+                             (<= x (:max this))))
+                      :contains
+                      (fn [this that]
+                        (and (:range that)
+                             (<= (:min this) (:min that))
+                             (>= (:max this) (:max that))))}))))
+
+
 (do :scratch
-    (entry keyword vector))
+    (entry-of keyword vector))
 
 (do :checks
 
-    (assert (member-of (set-of number)
-                       #{1 2 3})
+    (assert
+     (and (member-of (set-of number)
+                     #{1 2 3})
 
-            (member-of (tuple [keyword number])
-                       [:ok 1]))
+          (member-of (tuple [keyword number])
+                     [:ok 1])))
 
     (assert
      (and (contains vector vector)
@@ -251,4 +272,22 @@
           (contains (length 3) (length 3))
           (contains indexed  (compose vector (length 3)))
           (contains (tuple [number indexed])
-                    (tuple [integer vector])))))
+                    (tuple [integer vector]))))
+
+    (assert
+     (let [t (length (union [2 3 4]))
+           f (partial contains t)]
+       (and (f [2 3])
+            (f [2 4 5])
+            (not (f [3]))
+            (not (contains (compose list t) [2 3])))))
+
+    (assert
+     (let [t (integer-range 3 7)
+           f (partial contains t)]
+       (and (f 4)
+            (f 7)
+            (f (integer-range 3 6))
+            (f (union [4 6]))
+            (not (f 8))
+            (not (f (integer-range 4 9)))))))

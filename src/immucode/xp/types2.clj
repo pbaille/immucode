@@ -107,10 +107,13 @@
           (:union y) (every? (fn [m] (contains x m)) (:members y))
           (:union x) (some (fn [m] (contains m y)) (:members x))
           (:composition x) (every? (fn [m] (contains m y)) (:members x))
-          (:composition y) (some (fn [m] (contains x m)) (:members y))
+          (:composition y) (some (fn [m] (contains x m)) (:members y)) ;; wrong negatives here
           (:singleton y) (member-of x (:value y))
           (proto-get x :contains) (call-method x :contains y)
-          (proto-get y :contained) (call-method y :contained x))))
+          (proto-get y :contained) (call-method y :contained x)
+          (:primitive x) false
+          (:singleton x) false
+          :else (u/throw [::contains "no case:" x y]))))
 
     (defn unite [x y]
       (let [x (->type x) y (->type y)]
@@ -138,7 +141,8 @@
           (contains x y) y
           (contains y x) x
           (:composition y) (reduce compose x (:members y))
-          (:composition x) (update x :members conj y)
+          (:composition x) (update x :members (fn [ms] (-> (vec (remove (fn [m] (contains m y)) ms))
+                                                           (conj y))))
           :else (type {:composition true
                        :members [x y]}
                       {:value-check
@@ -150,7 +154,18 @@
       (case (count xs)
         0 any
         1 (first xs)
-        (reduce compose xs))))
+        (reduce compose xs)))
+
+    (defn negation [t]
+      (type {:negation true
+             :type (->type t)}
+            {:value-check
+             (fn [this x] (not (member-of (:type this) x)))
+             :contains
+             (fn [this that]
+               (if (:negation that)
+                 (contains (:type that) (:type this))
+                 (not (contains that (:type this)))))})))
 
 (do :unions
 
@@ -247,11 +262,37 @@
                       (fn [this that]
                         (and (:range that)
                              (<= (:min this) (:min that))
-                             (>= (:max this) (:max that))))}))))
+                             (>= (:max this) (:max that))))})))
+
+    (defn transition [from to]
+      (type {:transition true
+             :from from
+             :to to}
+            {:value-check
+             (fn [_ _] false)
+             :contains
+             (contains-impl :transition [:from :to])}))
+
+    (defn typed-transition [f from to]
+      (compose (transition from to) (singleton f)))
+
+    (contains (transition number number)
+              (typed-transition inc integer integer)))
 
 
 (do :scratch
-    (entry-of keyword vector))
+    (entry-of keyword vector)
+
+    (let [t1 (union [integer list boolean])
+          t2 (union [integer list keyword])]
+      [(contains t1 t2)
+       (contains t2 t1)
+       (compose t1 t2)])
+
+    (let [t1 (composition [integer list boolean])
+          t2 (composition [integer list keyword])]
+      [(contains t1 t2)
+       (contains t2 t1)]))
 
 (do :checks
 
@@ -274,6 +315,33 @@
           (contains (tuple [number indexed])
                     (tuple [integer vector]))))
 
+    (do :negation
+
+        (assert
+         (and (contains integer
+                        (compose integer (negation 1)))
+
+              (not (contains (compose integer (negation 1))
+                             integer))
+
+              (not (contains (negation 1)
+                             1))
+
+              (contains (negation 1)
+                        2)
+
+              (not (contains (compose integer (negation 1))
+                             1))
+
+              (contains (compose integer (negation 1))
+                        2)
+
+              (contains (negation integer)
+                        (negation number))
+
+              (not (contains (negation number)
+                             (negation integer))))))
+
     (assert
      (let [t (length (union [2 3 4]))
            f (partial contains t)]
@@ -291,3 +359,17 @@
             (f (union [4 6]))
             (not (f 8))
             (not (f (integer-range 4 9)))))))
+
+(do :difference
+
+    (defn difference
+      [x y]
+      (let [x (->type x) y (->type y)]
+        (cond
+          (:void x) x
+          (:void y) x
+          (:any y) void
+          (:any x) (negation y)
+          (:singleton x) void
+          (:union y) (reduce difference x (:members y))
+          (:union x) (union (map (fn [m] (difference m y)) (:members x)))))))

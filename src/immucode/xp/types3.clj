@@ -429,7 +429,23 @@
                          (case (count comparisons)
                            0 :equal
                            1 (first comparisons)
-                           :overlap))))})))))
+                           :overlap))))}))))
+
+    (defn negation [t]
+      (type {:negation true
+             :type (->type t)}
+            {:value-check
+             (fn [this x]
+               (not (value-check (:type this) x)))
+             :compare
+             (fn [this that]
+               (cond (:negation that)
+                     (compare (:type that) (:type this))
+                     :else (case (compare (:type this) that)
+                             :smaller :overlap
+                             (:bigger :equal) :distinct
+                             :overlap :overlap
+                             :distinct :smaller)))})))
 
 (do :uniform-collections
 
@@ -444,7 +460,15 @@
 
 (do :scratch
 
-    )
+    (let [not1 (negation 1)
+          not-int (negation integer)]
+      [(value-check not1 2)
+       (false? (value-check not1 1))
+       (compare not1 not1)
+       (compare not1 not-int)
+       (compare not1 integer)
+       (compare (intersect integer not1) integer)
+       (value-check (intersect integer not1) 1)]))
 
 (do :checks
     (assert

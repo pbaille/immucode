@@ -392,7 +392,44 @@
               :value-check
               (fn [this x]
                 (and (call-method (:key this) :value-check (key x))
-                     (call-method (:val this) :value-check (val x))))}))))
+                     (call-method (:val this) :value-check (val x))))})))
+
+    (defn length [n]
+      (unchecked-intersection
+       collection
+       (type {:length true
+              :value (->type n)}
+             {:value-check
+              (fn [this x]
+                (value-check (:value this) (count x)))
+              :compare
+              (fn [this that]
+                (cond (:length that)
+                      (compare (:value this) (:value that))))})))
+
+    (defn tuple [xs]
+      (unchecked-intersection
+       vector
+       (unchecked-intersection
+        (length (single (count xs)))
+        (type {:zip true
+               :members xs}
+              {:value-check
+               (fn [this x]
+                 (every? (fn [[a b]] (value-check a b))
+                         (map c/vector (:members this) x)))
+               :compare
+               (fn [this that]
+                 (cond (:zip that)
+                       (let [comparisons
+                             (-> (c/map compare
+                                        (:members this)
+                                        (:members that))
+                                 (c/set) (disj :equal))]
+                         (case (count comparisons)
+                           0 :equal
+                           1 (first comparisons)
+                           :overlap))))})))))
 
 (do :uniform-collections
 
@@ -406,7 +443,8 @@
       (intersect hash-set (many t))))
 
 (do :scratch
-    ())
+
+    )
 
 (do :checks
     (assert
@@ -490,4 +528,32 @@
         (compare collection
                  (many integer))
         (compare (many number)
-                 (many integer)))))
+                 (many integer))))
+
+    (assert
+     (and (value-check (length 3)
+                       [1 2 3])
+          (false? (value-check (length 2)
+                               [1 2 3]))
+          (value-check (length (union [2 3]))
+                       [2 3])
+          (value-check (length (union [2 3]))
+                       [1 2 3])
+          (false?
+           (value-check (length (union [2 3]))
+                        [1]))
+
+          (value-check (tuple [integer string])
+                       [1 "iop"])))
+
+    (assert
+     (and (= :equal
+             (compare (unchecked-intersection vector (length 3))
+                      (unchecked-intersection vector (length 3))))
+
+          (= :bigger
+             (compare (tuple [number string])
+                      (tuple [integer string])))
+          (= :smaller
+             (compare (tuple [integer string])
+                      (tuple [number string]))))))

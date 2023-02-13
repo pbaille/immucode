@@ -3,148 +3,77 @@
   (:require [clojure.core :as c]
             [immucode.utils :as u]))
 
-(defn type [data proto]
-  (vary-meta data
-             merge
-             {::type true
-              ::proto proto}))
+(do :type&proto
 
-(defn type? [x]
-  (some-> x meta ::type))
+    (defn type [data proto]
+      (vary-meta data
+                 merge
+                 {::type true
+                  ::proto proto}))
 
-(declare single)
+    (defn type? [x]
+      (some-> x meta ::type))
 
-(defn ->type [x]
-  (if (type? x)
-    x
-    (single x)))
+    (declare single)
 
-(defn proto [x]
-  (-> (->type x) meta ::proto))
+    (defn ->type [x]
+      (if (type? x)
+        x
+        (single x)))
 
-(defn proto-get [x k]
-  (get (proto x) k))
+    (defn proto [x]
+      (-> (->type x) meta ::proto))
 
-(defn call-method [x k y]
-  (if-let [f (proto-get x k)]
-    (f x y)))
+    (defn proto-get [x k]
+      (get (proto x) k))
 
-(defn value-checker [t]
-  (let [t (->type t)]
-    (-> t meta ::proto :value-check (partial t))))
+    (defn call-method [x k y]
+      (if-let [f (proto-get x k)]
+        (f x y))))
 
-(defn value-check [t x]
-  (let [t (->type t)
-        f (-> t meta ::proto :value-check)]
-    (f t x)))
+(do :value-check
 
-(comment
-  (do :extremes
+    (defn value-checker [t]
+      (let [t (->type t)]
+        (-> t meta ::proto :value-check (partial t))))
 
-      (def void
-        (type {:form :void
-               :void true}
-              {:value-check
-               (fn [_ _] false)}))
+    (defn value-check [t x]
+      (let [t (->type t)
+            f (-> t meta ::proto :value-check)]
+        (f t x))))
 
-      (def any
-        (type {:form :any
-               :any true}
-              {:value-check
-               (fn [_ _] true)})))
+(do :any_void_single
 
-  (do :control-macros
+    (def void (type {:void true}
+                    {:compare
+                     (fn [_ that]
+                       (if (:void that)
+                         :equal
+                         :smaller))
+                     :value-check
+                     (fn [_ _] false)}))
 
-      (defmacro or-some
-        [& xs]
-        (reduce (fn [ret e] `(if-some [x# ~e] x# ~ret))
-                nil
-                (reverse xs)))
+    (def any (type {:any true}
+                   {:compare
+                    (fn [_ that]
+                      (if (:any that)
+                        :equal
+                        :bigger))
+                    :value-check
+                    (fn [_ _] true)}))
 
-      (defmacro and-some
-        [& xs]
-        (reduce (fn [ret e] `(if-not (nil? ~e) ~ret))
-                nil
-                (reverse xs)))
-
-      (defmacro boolean-case
-        [test if-true if-false & [if-nil]]
-        `(case ~test
-           true ~if-true
-           false ~if-false
-           nil ~if-nil))
-
-      (defn not-some [x]
-        (boolean-case x false true))
-
-      (defmacro boolean-cases [& xs]
-        (reduce (fn [ret [p t f]] `(boolean-case ~p ~t ~f ~ret))
-                nil (reverse xs))))
-
-  (do :xp1
-      "methods of interest"
-      "those checks return true, false or nil (cannot be determined)"
-      [:contains
-       :distinct]
-
-      "those checks could be building block for other operations"
-      {:select ""
-       :retract ""
-       :connect ""}
-
-      (defn contains [x y]
-        (or-some (call-method x :contains y)
-                 (not-some (call-method y :contains x))))
-
-      (defn distinct [x y]
-        (or-some (call-method x :distinct y)
-                 (call-method y :distinct x)))
-
-      (defn select [x y]
-        (boolean-case (contains x y)
-
-                      [(distinct x y)
-                       void
-                       ]))
-
-
-      (defn connect [x y]
-        (or (call-method x :connect y)
-            (call-method y :connect x)
-            (boolean-cases
-             [(contains x y) x y]
-             [(intersects x y)
-              (:unchecked-union x (retract x y))
-              (:unchecked-union x y)])))
-
-      (defn retract [x y]
-        (or (call-method x :retract y)
-            (boolean-cases
-             [(contains x y)
-              (:todo)
-              void]
-             [(intersects x y)
-              (:todo)
-              x])))
-      ))
-
-(def void (type {:void true}
-                {:compare
-                 (fn [_ that]
-                   (if (:void that)
-                     :equal
-                     :smaller))
-                 :value-check
-                 (fn [_ _] false)}))
-
-(def any (type {:any true}
-               {:compare
-                (fn [_ that]
-                  (if (:any that)
-                    :equal
-                    :bigger))
-                :value-check
-                (fn [_ _] true)}))
+    (defn single [x]
+      (type {:single true
+             :value x}
+            {:compare
+             (fn [this that]
+               (cond
+                 (= that void) :bigger
+                 (call-method that :value-check (:value this)) :smaller
+                 :else :distinct))
+             :value-check
+             (fn [this x]
+               (= (:value this) x))})))
 
 (do :primitives
 
@@ -214,23 +143,27 @@
           (comparison_flip (call-method b :compare a))
           nil #_(u/throw [::compare a b]))))
 
-
-(defn single [x]
-  (type {:single true
-         :value x}
-        {:compare
-         (fn [this that]
-           (cond
-             (= that void) :bigger
-             (call-method that :value-check (:value this)) :smaller
-             :else :distinct))
-         :value-check
-         (fn [this x]
-           (= (:value this) x))}))
-
 (declare union intersection)
 
 (do :union
+
+    (defn compare-unions
+      [this that]
+      (if (and (= (:left this) (:right that))
+               (= (:left that) (:right this)))
+        :equal
+        (let [c1 (compare this (:left that))
+              c2 (compare this (:right that))
+              cs (c/set [c1 c2])]
+          (cond
+            (cs :smaller) :smaller
+            (= :distinct c1 c2) :distinct
+            (cs :distinct) :overlap
+            (= :bigger c1 c2) (if (and (= :bigger (compare that (:left this)))
+                                       (= :bigger (compare that (:right this))))
+                                :equal
+                                :bigger)
+            :else :overlap))))
 
     (defn unchecked-union [a b]
       (type {:union true
@@ -239,22 +172,7 @@
             {:compare
              (fn [this that]
                (if (:union that)
-                 (if (and (= (:left this) (:right that))
-                          (= (:left that) (:right this)))
-                   :equal
-                   (let [c1 (compare this (:left that))
-                         c2 (compare this (:right that))
-                         cs (c/set [c1 c2])]
-                     (cond
-                       (cs :smaller) :smaller
-                       (= :distinct c1 c2) :distinct
-                       (cs :distinct) :overlap
-                       (= :bigger c1 c2) (if (and (= :bigger (compare that (:left this)))
-                                                  (= :bigger (compare that (:right this))))
-                                           :equal
-                                           :bigger)
-                       :else :overlap)))
-
+                 (compare-unions this that)
                  (let [left-comparison (compare (:left this) that)]
                    (if (= :bigger left-comparison)
                      :bigger
@@ -293,36 +211,71 @@
         1 (->type (first xs))
         (reduce unite (map ->type xs)))))
 
-(do :unions
-
-    (def indexed (union [vector list]))
-    (def hashed (union [hash-map hash-set]))
-    (def number (union [integer float]))
-    (def collection (union [vector list hash-map hash-set]))
-    (def atomic (union [boolean integer float string keyword symbol])))
-
 (do :intersection
+
+    (defn compare-intersections
+      [{:as i1 l1 :left r1 :right}
+       {:as i2 l2 :left r2 :right}]
+      (let [ll (compare l1 l2)
+            lr (compare l1 r2)
+            rl (compare r1 l2)
+            rr (compare r1 r2)
+            xs (c/set [ll lr rl rr])]
+        (or (xs :distinct)
+            )))
+
+    (defn compare-intersections2
+      [this that]
+      (if (and (= (:left this) (:right that))
+               (= (:left that) (:right this)))
+        :equal
+        (let [c1 (compare this (:left that))
+              c2 (compare this (:right that))
+              cs (c/set [c1 c2])]
+          (cond
+            (cs :distinct) :distinct
+            (or (cs :equal) (cs :bigger)) :bigger
+            (= :smaller c1 c2) (if (and (= :smaller (compare that (:left this)))
+                                        (= :smaller (compare that (:right this))))
+                                 :equal
+                                 :smaller)
+            :else '(if (:intersection that)
+                    (let [left2 (:left that)
+                          right2 (:right that)]
+                      (let [c1 (compare left left2)]
+                        (if (= :distinct c1)
+                          :distinct
+                          (let [c2 (compare left right2)]
+                            (if (= :distinct c2)
+                              :distinct
+                              (let [c3 (compare right left2)]
+                                (if (= :distinct c3)
+                                  :distinct
+                                  (let [c4 (compare right right2)]
+                                    (if (= :distinct c4)
+                                      :distinct
+                                      (let )))))))))))))))
 
     (defn unchecked-intersection [a b]
       (type {:intersection true
              :left a
              :right b}
             {:compare
-             (fn [this that]
+             (fn [{:keys [left right]} that]
                (or (and (:intersection that)
-                        (or (and (= :equal (compare (:left this) (:left that)))
-                                 (= :equal (compare (:right this) (:right that))))
-                            (and (= :equal (compare (:left this) (:right that)))
-                                 (= :equal (compare (:right this) (:left that)))))
+                        (or (and (= :equal (compare left (:left that)))
+                                 (= :equal (compare right (:right that))))
+                            (and (= :equal (compare left (:right that)))
+                                 (= :equal (compare right (:left that)))))
                         :equal)
 
-                   (let [left-comparison (compare (:left this) that)]
+                   (let [left-comparison (compare left that)]
                      (if (or (= :distinct left-comparison)
                              (= :smaller left-comparison))
                        left-comparison
                        (comparison_intersect
                         left-comparison
-                        (compare (:right this) that))))))
+                        (compare right that))))))
 
              :unite
              (fn [this that]
@@ -360,6 +313,14 @@
         0 any
         1 (->type (first xs))
         (reduce intersect (map ->type xs)))))
+
+(do :primitives-groups
+
+    (def indexed (union [vector list]))
+    (def hashed (union [hash-map hash-set]))
+    (def number (union [integer float]))
+    (def collection (union [vector list hash-map hash-set]))
+    (def atomic (union [boolean integer float string keyword symbol])))
 
 (do :extras
 
@@ -470,114 +431,158 @@
        (compare (intersect integer not1) integer)
        (value-check (intersect integer not1) 1)]))
 
-(do :checks
-    (assert
-     (and
-      (= :equal
-         (compare (single 2) (single 2)))
 
-      (= :distinct
-         (compare (single 1) (single 2)))
 
-      (= :smaller
-         (compare void (single 2)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(assert
+ (and
+  (= :equal
+     (compare (single 2) (single 2)))
+
+  (= :distinct
+     (compare (single 1) (single 2)))
+
+  (= :smaller
+     (compare void (single 2)))
+
+  (= :bigger
+     (compare (single 2) void))
+
+  (= :bigger
+     (compare (union [1 2 3])
+              (single 1)))
+
+  (= :smaller
+     (compare (single 1)
+              (union [1 2 3])))
+
+  (= :equal
+     (compare (union [1 2])
+              (union [2 1])))
+
+  (= :equal
+     (compare (union [1 2 3])
+              (union [1 3 2])))
+
+  (= :equal
+     (compare
+      (union [(union [1 2 3])
+              (union [2 3 4])])
+      (union [1 2 3 4])))
+
+  (= :equal
+     (compare
+      (union [1 2 3])
+      (union [(union [1 2])
+              (union [2 3])])))
+
+  (= :equal
+     (compare (intersection [(union [indexed hash-map])
+                             (union [hashed vector])])
+              (union [hash-map vector])))))
+
+(assert
+ (and
+
+  (= (single 1)
+     (union [1 1 1]))
+
+  (= any
+     (union [(union [1 2 3])
+             any])
+     (union [any void]))
+
+  (= void
+     (intersection [1 2])
+     (intersection [integer string])
+     (intersection [collection string]))
+
+  (= vector
+     (intersection [(intersection [collection indexed])
+                    (intersection [vector indexed])])
+     (intersection [collection
+                    (union [vector string])]))))
+
+(assert
+ (= :bigger
+    (compare collection
+             (single [1 2 3]))))
+
+(assert
+ (= :bigger
+    (compare (many integer)
+             (single [1 2 3]))
+    (compare collection
+             (many integer))
+    (compare (many number)
+             (many integer))))
+
+(assert
+ (and (value-check (length 3)
+                   [1 2 3])
+      (false? (value-check (length 2)
+                           [1 2 3]))
+      (value-check (length (union [2 3]))
+                   [2 3])
+      (value-check (length (union [2 3]))
+                   [1 2 3])
+      (false?
+       (value-check (length (union [2 3]))
+                    [1]))
+
+      (value-check (tuple [integer string])
+                   [1 "iop"])))
+
+(assert
+ (and (= :equal
+         (compare (unchecked-intersection vector (length 3))
+                  (unchecked-intersection vector (length 3)))
+         #_(compare (unchecked-intersection (length 3) vector)
+                  (unchecked-intersection vector (length 3)))
+         #_(compare (length 3)
+                  (unchecked-intersection vector (length 3)))
+         #_(compare vector
+                  (unchecked-intersection vector (length 3))))
 
       (= :bigger
-         (compare (single 2) void))
-
-      (= :bigger
-         (compare (union [1 2 3])
-                  (single 1)))
-
+         (compare (tuple [number string])
+                  (tuple [integer string])))
       (= :smaller
-         (compare (single 1)
-                  (union [1 2 3])))
-
-      (= :equal
-         (compare (union [1 2])
-                  (union [2 1])))
-
-      (= :equal
-         (compare (union [1 2 3])
-                  (union [1 3 2])))
-
-      (= :equal
-         (compare
-          (union [(union [1 2 3])
-                  (union [2 3 4])])
-          (union [1 2 3 4])))
-
-      (= :equal
-         (compare
-          (union [1 2 3])
-          (union [(union [1 2])
-                  (union [2 3])])))
-
-      (= :equal
-         (compare (intersection [(union [indexed hash-map])
-                                 (union [hashed vector])])
-                  (union [hash-map vector])))))
-
-    (assert
-     (and
-
-      (= (single 1)
-         (union [1 1 1]))
-
-      (= any
-         (union [(union [1 2 3])
-                 any])
-         (union [any void]))
-
-      (= void
-         (intersection [1 2])
-         (intersection [integer string])
-         (intersection [collection string]))
-
-      (= vector
-         (intersection [(intersection [collection indexed])
-                        (intersection [vector indexed])])
-         (intersection [collection
-                        (union [vector string])]))))
-
-    (assert
-     (= :bigger
-        (compare collection
-                 (single [1 2 3]))))
-
-    (assert
-     (= :bigger
-        (compare (many integer)
-                 (single [1 2 3]))
-        (compare collection
-                 (many integer))
-        (compare (many number)
-                 (many integer))))
-
-    (assert
-     (and (value-check (length 3)
-                       [1 2 3])
-          (false? (value-check (length 2)
-                               [1 2 3]))
-          (value-check (length (union [2 3]))
-                       [2 3])
-          (value-check (length (union [2 3]))
-                       [1 2 3])
-          (false?
-           (value-check (length (union [2 3]))
-                        [1]))
-
-          (value-check (tuple [integer string])
-                       [1 "iop"])))
-
-    (assert
-     (and (= :equal
-             (compare (unchecked-intersection vector (length 3))
-                      (unchecked-intersection vector (length 3))))
-
-          (= :bigger
-             (compare (tuple [number string])
-                      (tuple [integer string])))
-          (= :smaller
-             (compare (tuple [integer string])
-                      (tuple [number string]))))))
+         (compare (tuple [integer string])
+                  (tuple [number string])))))

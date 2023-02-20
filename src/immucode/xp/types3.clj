@@ -125,18 +125,6 @@
               (cs :overlap)
               (cs :distinct)))))
 
-    (defn comparison_intersect [x y]
-      (if (= x y)
-        x
-        (let [cs #{x y}]
-          (or (cs :distinct)
-              (cs :smaller)
-              (if (cs :equal)
-                (if (cs :bigger)
-                  :equal
-                  :smaller))
-              (cs :overlap)))))
-
     (defn compare [a b]
       (or (and (= a b) :equal)
           (call-method a :compare b)
@@ -213,69 +201,72 @@
 
 (do :intersection
 
-    (defn compare-intersections
-      [{:as i1 l1 :left r1 :right}
-       {:as i2 l2 :left r2 :right}]
-      (let [ll (compare l1 l2)
-            lr (compare l1 r2)
-            rl (compare r1 l2)
-            rr (compare r1 r2)
-            xs (c/set [ll lr rl rr])]
-        (or (xs :distinct)
-            )))
+    (defn comparison_intersect [x y]
+      #_(println "comparison_intersect " x y)
+      (if (= x y)
+        x
+        (let [cs #{x y}]
+          (or (cs :distinct)
+              (cs :smaller)
+              (if (cs :equal)
+                (if (cs :bigger)
+                  :equal
+                  :smaller))
+              (cs :overlap)))))
 
-    (defn compare-intersections2
-      [this that]
-      (if (and (= (:left this) (:right that))
-               (= (:left that) (:right this)))
-        :equal
-        (let [c1 (compare this (:left that))
-              c2 (compare this (:right that))
-              cs (c/set [c1 c2])]
-          (cond
-            (cs :distinct) :distinct
-            (or (cs :equal) (cs :bigger)) :bigger
-            (= :smaller c1 c2) (if (and (= :smaller (compare that (:left this)))
-                                        (= :smaller (compare that (:right this))))
-                                 :equal
-                                 :smaller)
-            :else '(if (:intersection that)
-                    (let [left2 (:left that)
-                          right2 (:right that)]
-                      (let [c1 (compare left left2)]
-                        (if (= :distinct c1)
-                          :distinct
-                          (let [c2 (compare left right2)]
-                            (if (= :distinct c2)
-                              :distinct
-                              (let [c3 (compare right left2)]
-                                (if (= :distinct c3)
-                                  :distinct
-                                  (let [c4 (compare right right2)]
-                                    (if (= :distinct c4)
-                                      :distinct
-                                      (let )))))))))))))))
+    (defn compare-intersection [this that]
+      (let [left-comparison (compare (:left this) that)]
+        (if (or (= :distinct left-comparison)
+                (= :smaller left-comparison))
+          left-comparison
+          (comparison_intersect
+           left-comparison
+           (compare (:right this) that)))))
+
+    (defn compare-intersections
+      [{:as this l1 :left r1 :right}
+       {:as that l2 :left r2 :right}]
+
+      (or (and (= l1 r2)
+               (= l2 r1)
+               :equal)
+
+          (let [c1 (compare this l2)
+                c2 (compare this r2)
+                cs (c/set [c1 c2])]
+
+            (cond
+
+              (cs :distinct) :distinct
+
+              (or (cs :equal)
+                  (cs :bigger)) :bigger
+
+              (= :smaller c1 c2)
+              (if (and (= :smaller (compare that l1))
+                       (= :smaller (compare that r1)))
+                :equal
+                :smaller)
+
+              :else
+              (let [ll (compare l1 l2)
+                    lr (compare l1 r2)
+                    rl (compare r1 l2)
+                    rr (compare r1 r2)
+                    xs (c/set [ll lr rl rr])]
+                (cond (xs :distinct) :distinct
+                      (or (= :equal ll rr)
+                          (= :equal lr rl)) :equal))))))
 
     (defn unchecked-intersection [a b]
       (type {:intersection true
              :left a
              :right b}
             {:compare
-             (fn [{:keys [left right]} that]
+             (fn [this that]
                (or (and (:intersection that)
-                        (or (and (= :equal (compare left (:left that)))
-                                 (= :equal (compare right (:right that))))
-                            (and (= :equal (compare left (:right that)))
-                                 (= :equal (compare right (:left that)))))
-                        :equal)
-
-                   (let [left-comparison (compare left that)]
-                     (if (or (= :distinct left-comparison)
-                             (= :smaller left-comparison))
-                       left-comparison
-                       (comparison_intersect
-                        left-comparison
-                        (compare right that))))))
+                        (compare-intersections this that))
+                   (compare-intersection this that)))
 
              :unite
              (fn [this that]
@@ -324,8 +315,26 @@
 
 (do :extras
 
+    (defn derived-type [parent this]
+      (let [proto (proto this)
+            compare-method (get proto :compare)
+            value-check-method (get proto :value-check)]
+        (type this
+              (assoc (proto this)
+                     :compare
+                     (fn [this that]
+                       (let [comparison (compare parent that)]
+                         (case comparison
+                           :distinct :distinct
+                           (:smaller :equal) :smaller
+                           (compare-method this that))))
+                     :value-check
+                     (fn [this x]
+                       (and (value-check parent x)
+                            (value-check-method this x)))))))
+
     (defn many [t]
-      (unchecked-intersection
+      (derived-type
        collection
        (type {:many true
               :element-type (->type t)}
@@ -340,7 +349,7 @@
                         xs))})))
 
     (defn entry-of [k v]
-      (unchecked-intersection
+      (derived-type
        entry
        (type {:entry true
               :key k :val v}
@@ -356,7 +365,7 @@
                      (call-method (:val this) :value-check (val x))))})))
 
     (defn length [n]
-      (unchecked-intersection
+      (derived-type
        collection
        (type {:length true
               :value (->type n)}
@@ -365,13 +374,13 @@
                 (value-check (:value this) (count x)))
               :compare
               (fn [this that]
-                (cond (:length that)
-                      (compare (:value this) (:value that))))})))
+                (cond (:length that) (compare (:value this) (:value that))
+                      (:primitive that) :overlap))})))
 
     (defn tuple [xs]
-      (unchecked-intersection
+      (derived-type
        vector
-       (unchecked-intersection
+       (derived-type
         (length (single (count xs)))
         (type {:zip true
                :members xs}
@@ -419,6 +428,7 @@
     (defn set-of [t]
       (intersect hash-set (many t))))
 
+#_(u/throw :stop)
 (do :scratch
 
     (let [not1 (negation 1)
@@ -569,20 +579,28 @@
       (value-check (tuple [integer string])
                    [1 "iop"])))
 
+(assert (and (= (length 3) (length 3))
+             (= :overlap
+                (compare (length 3) vector))
+             (= :smaller
+                (compare (intersection [vector (length 3)]) (length 3)))
+             (= :overlap
+                (compare (intersection [vector (length (union [2 3 4]))]) (length 3)))))
+
 (assert
  (and (= :equal
          (compare (unchecked-intersection vector (length 3))
                   (unchecked-intersection vector (length 3)))
-         #_(compare (unchecked-intersection (length 3) vector)
-                  (unchecked-intersection vector (length 3)))
-         #_(compare (length 3)
-                  (unchecked-intersection vector (length 3)))
-         #_(compare vector
+         (compare (unchecked-intersection (length 3) vector)
                   (unchecked-intersection vector (length 3))))
 
       (= :bigger
          (compare (tuple [number string])
-                  (tuple [integer string])))
+                  (tuple [integer string]))
+         (compare (length 3)
+                  (unchecked-intersection vector (length 3)))
+         (compare vector
+                  (unchecked-intersection vector (length 3))))
       (= :smaller
          (compare (tuple [integer string])
                   (tuple [number string])))))

@@ -16,16 +16,16 @@
 
 (def EMPTY
   (with-proto `EMPTY
-    :intersect (constantly EMPTY)
-    :fits (constantly true)))
+    :intersect (fn [_ _] EMPTY)
+    :fits (fn [_ _] true)))
 
 (defn empty-type? [x]
   (= EMPTY x))
 
 (def ANY
   (with-proto `ANY
-    :intersect identity
-    :contains (constantly true)))
+    :intersect (fn [_ x] x)
+    :contains (fn [_ _] true)))
 
 (defn any-type? [x]
   (= ANY x))
@@ -33,9 +33,9 @@
 (defn contains [t1 t2]
   (or (= t1 t2)
       (? [f (get-method t1 :contains)]
-         (f t2))
+         (f t1 t2))
       (? [f (get-method t2 :fits)]
-         (f t1))))
+         (f t2 t1))))
 
 (defn fits [t1 t2]
   (contains t2 t1))
@@ -44,8 +44,8 @@
   (?
    (contains t1 t2) t2
    (contains t2 t1) t1
-   [f (get-method t1 :intersect)] (f t2)
-   [f (get-method t2 :intersect)] (f t1)
+   [f (get-method t1 :intersect)] (f t1 t2)
+   [f (get-method t2 :intersect)] (f t2 t1)
    EMPTY))
 
 (defn union
@@ -63,13 +63,15 @@
       1 (first members)
       (with-proto {::union members}
         :intersect
-        (fn [t]
+        (fn [_ t]
           (union (map (partial intersect t) members)))
         :contains
-        (fn [t]
-          (boolean (some (partial fits t) members)))
+        (fn [this t]
+          (?
+           [{::union xs} t] (every? (partial contains this) xs)
+           (boolean (some (partial fits t) members))))
         :fits
-        (fn [t]
+        (fn [_ t]
           (every? (partial contains t) members))))))
 
 (do :checks
@@ -103,7 +105,7 @@
       (with-proto {::comp members}
 
         :intersect
-        (fn [t]
+        (fn [_ t]
           (loop [ret t todo members]
             (if-let [[m & todo] (seq todo)]
               (let [ret' (intersect ret m)]
@@ -113,7 +115,7 @@
               ret)))
 
         :contains
-        (fn [t]
+        (fn [_ t]
           (loop [xs members]
             (if-let [[x & xs] (seq xs)]
               (and (contains x t)
@@ -121,7 +123,7 @@
               true)))
 
         :fits
-        (fn [t]
+        (fn [_ t]
           (fits (first members) t))))))
 
 (defn from-pred [name f]

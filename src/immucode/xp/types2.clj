@@ -142,7 +142,7 @@
           (contains y x) x
           (:composition y) (reduce compose x (:members y))
           (:composition x) (update x :members (fn [ms] (-> (vec (remove (fn [m] (contains m y)) ms))
-                                                           (conj y))))
+                                                          (conj y))))
           :else (type {:composition true
                        :members [x y]}
                       {:value-check

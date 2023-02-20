@@ -126,3 +126,35 @@ the env returning versions of interpret and build have been abandonned
 *** types again
 in the =if= form (which is used for shorcircuiting bindings in =let=) the test expression can provide type refinements to its branches
 how a type refinement should be propagated ?
+
+Does each node has to keep track of all its dependincies in order to propagate type refinement easily ?
+A node can propagate to its children easily (via a method call ?)
+
+**** DONE deps method refactoring
+the deps method compute transitive deps
+maybe we should have a direct deps mecanism, should be better to propagate efficiently
+the deps method could be changed to only direct deps
+the transitive thing would be done in compile and it would simplify deps method implementations
+
+** <2023-02-03 Fri>
+*** type inference
+=:refine= method
+node unification on lambda application
+applied lambda is like let
+a let is a seq of bindings
+each binding can result in a refinement
+** <2023-02-08 Wed>
+=xp/types2.clj= is going well
+*** further steps
+**** difference ?
+a type constructor that excludes some elements could be nice
+maybe just a =not= type (negation) in conjunction to a composition type
+**** type transitions
+a function can be typed with a type transition
+**** comparing types
+several possibilities
+- equal
+- distinct
+- bigger
+- smaller
+- overlap

@@ -1,5 +1,5 @@
 (ns immucode.xp.types3
-  (:refer-clojure :exclude [compare type boolean float symbol keyword vector-of vector list hash-map hash-set])
+  (:refer-clojure :exclude [compare type boolean float symbol keyword vector-of vector list hash-map hash-set distinct?])
   (:require [clojure.core :as c]
             [immucode.utils :as u]))
 
@@ -27,9 +27,13 @@
     (defn proto-get [x k]
       (get (proto x) k))
 
-    (defn call-method [x k y]
-      (if-let [f (proto-get x k)]
-        (f x y))))
+    (defn call-method
+      ([x k]
+       (if-let [f (proto-get x k)]
+         (f x)))
+      ([x k y]
+       (if-let [f (proto-get x k)]
+         (f x y)))))
 
 (do :value-check
 
@@ -113,6 +117,39 @@
         :equal :equal
         nil))
 
+    (defn compare [a b]
+      (or (and (= a b) :equal)
+          (call-method a :compare b)
+          (comparison_flip (call-method b :compare a))
+          nil #_(u/throw [::compare a b])))
+
+    (do :cases
+
+        (defn equal? [this that]
+          (= :equal (compare this that)))
+
+        (defn bigger? [this that]
+          (= :bigger (compare this that)))
+
+        (defn smaller? [this that]
+          (= :smaller (compare this that)))
+
+        (defn gte [this that]
+          (contains? #{:equal :bigger} (compare this that)))
+
+        (defn lte [this that]
+          (contains? #{:equal :smaller} (compare this that)))
+
+        (defn distinct? [this that]
+          (= :distinct (compare this that)))
+
+        (defn overlap? [this that]
+          (= :overlap (compare this that)))))
+
+(declare union intersection)
+
+(do :union
+
     (defn comparison_unite [x y]
       (if (= x y)
         x
@@ -124,16 +161,6 @@
                   :equal))
               (cs :overlap)
               (cs :distinct)))))
-
-    (defn compare [a b]
-      (or (and (= a b) :equal)
-          (call-method a :compare b)
-          (comparison_flip (call-method b :compare a))
-          nil #_(u/throw [::compare a b]))))
-
-(declare union intersection)
-
-(do :union
 
     (defn compare-unions
       [this that]
@@ -147,8 +174,8 @@
             (cs :smaller) :smaller
             (= :distinct c1 c2) :distinct
             (cs :distinct) :overlap
-            (= :bigger c1 c2) (if (and (= :bigger (compare that (:left this)))
-                                       (= :bigger (compare that (:right this))))
+            (= :bigger c1 c2) (if (and (bigger? that (:left this))
+                                       (bigger? that (:right this)))
                                 :equal
                                 :bigger)
             :else :overlap))))
@@ -243,8 +270,8 @@
                   (cs :bigger)) :bigger
 
               (= :smaller c1 c2)
-              (if (and (= :smaller (compare that l1))
-                       (= :smaller (compare that r1)))
+              (if (and (smaller? that l1)
+                       (smaller? that r1))
                 :equal
                 :smaller)
 
@@ -402,20 +429,21 @@
                            :overlap))))}))))
 
     (defn negation [t]
-      (type {:negation true
-             :type (->type t)}
-            {:value-check
-             (fn [this x]
-               (not (value-check (:type this) x)))
-             :compare
-             (fn [this that]
-               (cond (:negation that)
-                     (compare (:type that) (:type this))
-                     :else (case (compare (:type this) that)
-                             :smaller :overlap
-                             (:bigger :equal) :distinct
-                             :overlap :overlap
-                             :distinct :smaller)))})))
+      (or (call-method t :complement)
+          (type {:negation true
+                 :type (->type t)}
+                {:value-check
+                 (fn [this x]
+                   (not (value-check (:type this) x)))
+                 :compare
+                 (fn [this that]
+                   (cond (:negation that)
+                         (compare (:type that) (:type this))
+                         :else (case (compare (:type this) that)
+                                 :smaller :overlap
+                                 (:bigger :equal) :distinct
+                                 :overlap :overlap
+                                 :distinct :smaller)))}))))
 
 (do :uniform-collections
 
@@ -429,17 +457,7 @@
       (intersect hash-set (many t))))
 
 #_(u/throw :stop)
-(do :scratch
-
-    (let [not1 (negation 1)
-          not-int (negation integer)]
-      [(value-check not1 2)
-       (false? (value-check not1 1))
-       (compare not1 not1)
-       (compare not1 not-int)
-       (compare not1 integer)
-       (compare (intersect integer not1) integer)
-       (value-check (intersect integer not1) 1)]))
+(do :scratch)
 
 
 
@@ -604,3 +622,13 @@
       (= :smaller
          (compare (tuple [integer string])
                   (tuple [number string])))))
+(assert
+ (let [not1 (negation 1)
+       not-int (negation integer)]
+   (and (value-check not1 2)
+        (false? (value-check not1 1))
+        (= :equal (compare not1 not1))
+        (= :bigger (compare not1 not-int))
+        (= :overlap (compare not1 integer))
+        (= :smaller (compare (intersect integer not1) integer))
+        (false? (value-check (intersect integer not1) 1)))))

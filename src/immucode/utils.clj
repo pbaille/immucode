@@ -99,3 +99,8 @@
 (defmacro with-gensyms [xs & body]
   `(let [~xs (map gensym ~(mapv #(str (name %) "_") xs))]
      ~@body))
+
+(defn pairs&return [xs]
+  (if (odd? (count xs))
+    [(partition 2 (butlast xs)) (last xs)]
+    [(partition 2 xs) nil]))

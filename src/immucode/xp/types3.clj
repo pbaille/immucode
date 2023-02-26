@@ -1,7 +1,17 @@
 (ns immucode.xp.types3
-  (:refer-clojure :exclude [compare type boolean float symbol keyword vector-of vector list hash-map hash-set distinct?])
+  (:refer-clojure :exclude [compare type boolean float symbol keyword
+                            vector-of vector list hash-map hash-set
+                            distinct? complement distinct? keys])
   (:require [clojure.core :as c]
-            [immucode.utils :as u]))
+            [immucode.utils :as u]
+            [clojure.set :as set]))
+
+(do :helpers
+
+    (defmacro setcase [seed & cases]
+      (condp #(every? (partial contains? %2) %1)
+          ~seed
+        ~@cases)))
 
 (do :type&proto
 
@@ -321,7 +331,7 @@
         (:smaller :equal) a
         :bigger b
         :distinct void
-        :overlap
+        #_:overlap
         (or (call-method a :intersect b)
             (call-method b :intersect a)
             (unchecked-intersection a b))))
@@ -379,7 +389,7 @@
       (derived-type
        entry
        (type {:entry true
-              :key k :val v}
+              :key (->type k) :val (->type v)}
              {:compare
               (fn [this that]
                 (cond (:entry that)
@@ -418,17 +428,17 @@
                :compare
                (fn [this that]
                  (cond (:zip that)
-                       (let [comparisons
-                             (-> (c/map compare
-                                        (:members this)
-                                        (:members that))
-                                 (c/set) (disj :equal))]
-                         (case (count comparisons)
-                           0 :equal
-                           1 (first comparisons)
-                           :overlap))))}))))
+                       (let [cs (-> (c/map compare
+                                           (:members this)
+                                           (:members that))
+                                    (c/set))]
+                         (cond
+                           (= 1 (count cs)) (first cs)
+                           (= cs #{:equal :bigger}) :bigger
+                           (= cs #{:equal :smaller}) :smaller
+                           :else :overlap))))}))))
 
-    (defn negation [t]
+    (defn complement [t]
       (or (call-method t :complement)
           (type {:negation true
                  :type (->type t)}
@@ -443,7 +453,10 @@
                                  :smaller :overlap
                                  (:bigger :equal) :distinct
                                  :overlap :overlap
-                                 :distinct :smaller)))}))))
+                                 :distinct :smaller)))})))
+
+    (defn complement? [this that]
+      (equal? this (complement that))))
 
 (do :uniform-collections
 
@@ -457,7 +470,61 @@
       (intersect hash-set (many t))))
 
 #_(u/throw :stop)
-(do :scratch)
+(do :scratch
+
+    (defn contains-entry
+      ([e]
+       (derived-type
+        hash-map
+        (type {:contains-entry true
+               :entry e}
+              {:compare
+               (fn [this that]
+                 (cond
+                   (:contains-entry that) (compare (:entry this) (:entry that))))
+               :value-check
+               (fn [this v]
+                 (some (value-checker (:entry this)) v))})))
+      ([k v]
+       (contains-entry (entry-of k v))))
+
+    (defn keyword-map
+      [m]
+      (let [ks (c/keys m)]
+        (assert (every? keyword? ks))
+        (derived-type
+         (map-of keyword any)
+         (type {:keyword-map true
+                :keys (set ks)
+                :map (u/$vals m ->type)}
+               {:compare
+                (fn [this that]
+                  (cond
+                    (:keyword-map that)
+                    (let [this-map (:map this)
+                          that-map (:map that)
+                          cs (-> (c/map (fn [k] (compare (get this-map k any) (get that-map k any)))
+                                        (into (:keys this) (:keys that)))
+                                 (c/set))]
+                      (cond
+                        (= 1 (count cs)) (first cs)
+                        (= cs #{:equal :bigger}) :bigger
+                        (= cs #{:equal :smaller}) :smaller
+                        :else :overlap))))
+                :value-check
+                (fn [this v]
+                  (every? (fn [[k t]]
+                            (value-check t (get v k)))
+                          (:map this)))}))))
+
+
+
+
+
+
+
+
+    )
 
 
 
@@ -623,8 +690,8 @@
          (compare (tuple [integer string])
                   (tuple [number string])))))
 (assert
- (let [not1 (negation 1)
-       not-int (negation integer)]
+ (let [not1 (complement 1)
+       not-int (complement integer)]
    (and (value-check not1 2)
         (false? (value-check not1 1))
         (= :equal (compare not1 not1))
@@ -632,3 +699,34 @@
         (= :overlap (compare not1 integer))
         (= :smaller (compare (intersect integer not1) integer))
         (false? (value-check (intersect integer not1) 1)))))
+
+(assert
+ (let [t (contains-entry :pouet integer)
+       t2 (contains-entry (union [:pouet :mouette]) number)]
+   (and
+    (value-check t {:pouet 1})
+    (not (value-check t {:pouet "ert"}))
+    (smaller? t t2)
+    (bigger? t2 t)
+    (smaller? t hash-map)
+    (distinct? t vector))))
+
+(assert
+ (let [t1 (keyword-map {:a number
+                        :b keyword})
+       t2 (keyword-map {:a integer
+                        :b keyword
+                        :c symbol})
+       t3 (keyword-map {:a number})
+       t4 (keyword-map {:a integer
+                        :c string?})]
+   (and
+    (value-check t1 {:a 1 :b :iop})
+    (value-check t1 {:a 1 :b :iop :c "anything"})
+    (not (value-check t1 {:a 1}))
+    (not (value-check t1 {:a 1 :b 'iop}))
+    (bigger? t1 t2)
+    (smaller? t2 t1)
+    (smaller? t1 t3)
+    (bigger? t3 t1)
+    (overlap? t1 t4))))

@@ -158,3 +158,6 @@ several possibilities
 - bigger
 - smaller
 - overlap
+** <2023-02-21 Tue>
+=types3.clj= implements comparison and negation along previous things.
+The comparison of intersection types is tricky and the implementation is incomplete.

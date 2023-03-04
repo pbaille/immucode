@@ -470,7 +470,7 @@
       (intersect hash-set (many t))))
 
 #_(u/throw :stop)
-(do :scratch
+(do :maps
 
     (defn contains-entry
       ([e]
@@ -515,16 +515,49 @@
                 (fn [this v]
                   (every? (fn [[k t]]
                             (value-check t (get v k)))
-                          (:map this)))}))))
+                          (:map this)))})))))
 
+(do :functions
 
+    (defn transition [verb args return]
+      (type {:transition true
+             :verb verb
+             :args args
+             :return return}
+            {:compare
+             (fn [this that]
+               (compare (:return this) that))
+             :value-check
+             (fn [this v]
+               (value-check (:return this) v))}))
 
+    (defn numeric-transition [verb]
+      (fn [& xs]
+        (transition verb
+                    (mapv (fn [x] (intersection [number x])) xs)
+                    number)))
 
+    (def transitions
+      {::c/assoc (fn [m k v]
+                   (let [m' (intersection [hash-map m])]
+                     (transition :assoc
+                                 [m'
+                                  (intersection [keyword k])
+                                  v]
+                                 (intersection [m' (contains-entry k v)]))))
 
+       ::c/+ (numeric-transition ::c/+)
+       ::c/- (numeric-transition ::c/-)
+       ::c/* (numeric-transition ::c/*)
+       ::c// (numeric-transition ::c//)
 
+       })
 
+    (comment
+      (-> (assoc (hash-map m) (keyword k) v)
+          (+ m (contains-entry k v))))
 
-    )
+    ())
 
 
 

@@ -81,7 +81,7 @@ sometimes test result can be determined at bind time and a branch can be selecte
 as a simple exemple: if the test is =(vector? x)= and x is known to be a vector, the else branch is discarded at bind time
 bind time dispatch can be realised this way maybe (=multi-fn.simple=)
 *** types
-should try to add some simply type functions that will be able to throw meaningful bind time error
+should try to add some simply typed functions that will be able to throw meaningful bind time error
 will begin with some commonly used clojure functions.
 type system will be quite complicated since it implies some kind of chain reaction
 if one node refine the type of its parent this information has to be forwarded to nodes that depend on the parent that can refine it back etc...

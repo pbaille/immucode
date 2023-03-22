@@ -85,14 +85,16 @@
         (partition 2 1 (thunk-symbols))))
 
 (defn emit-form
-  [body options]
-  (let [cases (body->cases body options)
-        return (compile-case (first cases) options)]
-    (if (next cases)
-      (let [bindings (->> (cases->thunks (next cases) options)
-                          reverse (mapcat identity) vec)]
-        (list 'let bindings return))
-      return)))
+  ([body]
+   (emit-form body (options)))
+  ([body options]
+   (let [cases (body->cases body options)
+         return (compile-case (first cases) options)]
+     (if (next cases)
+       (let [bindings (->> (cases->thunks (next cases) options)
+                           reverse (mapcat identity) vec)]
+         (list 'let bindings return))
+       return))))
 
 (defmacro ?
   ""

@@ -161,3 +161,38 @@ several possibilities
 ** <2023-02-21 Tue>
 =types3.clj= implements comparison and negation along previous things.
 The comparison of intersection types is tricky and the implementation is incomplete.
+** <2023-03-11 Sat>
+introduction of predicates for primitives
+e.g =keyword?=, =number?=
+that can be use as binding pattern and contribute to compile time typechecking
+=(fn [(number? x) (number? y)] (+ x y))=
+but how to type the return value ?
+the Carp language uses the =the= verb to give type hint
+=(the number (+ x y))=
+this simple add function could be written in several ways
+
+#+begin_src clojure
+(fn [x y]
+  (and (the number x)
+       (the number y)
+       (the number (+ x y))))
+
+(fn [(the number x)
+    (the number y)]
+  (the number (+ x y)))
+
+(fn [(number? x) (number? y)]
+  (the number (+ x y)))
+
+(fn [(:- x number)
+    (:- y number)]
+  (the number (+ x y)))
+
+(fn [(T x number)
+    (T y number)]
+  (the number (+ x y)))
+
+(fn [(is x number)
+    (is y number)]
+  (the number (+ x y)))
+#+end_src

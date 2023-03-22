@@ -1,4 +1,4 @@
-(ns immucode.xp.types3
+(ns immucode.types
   (:refer-clojure :exclude [compare type boolean float symbol keyword
                             vector-of vector list hash-map hash-set
                             distinct? complement distinct? keys])
@@ -526,10 +526,13 @@
              :return return}
             {:compare
              (fn [this that]
-               (compare (:return this) that))
+               (cond (:transition that)
+                     (let [c1 (compare (tuple (:args that)) (tuple (:args this)))
+                           c2 (compare (:return this) (:return that))]
+                       (comparison_intersect c1 c2))))
              :value-check
              (fn [this v]
-               (value-check (:return this) v))}))
+               (u/throw [::transition :value-check :impossible]))}))
 
     (defn numeric-transition [verb]
       (fn [& xs]
@@ -553,11 +556,18 @@
 
        })
 
+    (compare (transition :a [integer integer] number)
+             (transition :b [number number] integer)
+             )
+    (compare (transition :a [integer integer] number)
+             (transition :b [number number] number)
+             )
+
     (comment
       (-> (assoc (hash-map m) (keyword k) v)
           (+ m (contains-entry k v))))
 
-    ())
+    )
 
 
 

@@ -6,6 +6,7 @@
             [immucode.composite-literals :as composite]
             [immucode.destructure :as destructure]
             [immucode.quote :as quote]
+            [immucode.types :as types]
             [clojure.string :as str]
             [immucode.control :as control]))
 
@@ -55,7 +56,16 @@
       [env]
       (->> (tree/children env)
            (filter (comp int? ::tree/name))
-           (sort-by ::tree/name))))
+           (sort-by ::tree/name)))
+
+    (defn target-type [env]
+      (let [target (target-node env)]
+        (or (get target :type)
+            (some-> target :value types/single)
+            types/any)))
+
+    (defn void-node? [env]
+      (= types/void (target-type env))))
 
 (defn bind
 
@@ -166,8 +176,11 @@
 
 (defn build
   [env]
-  (if (contains? env :value) ; handling falsy values
-    (get env :value)
+  (cond
+    (void-node? env) (u/throw [::build "node is void !"])
+     ; handling falsy values
+    (contains? env :value) (get env :value)
+    :else
     (if-let [build (:build env)]
       (build env)
       (if-let [target-path (:link env)]
@@ -191,6 +204,49 @@
       (list 'let (vec bindings) (build env))
       (build env))))
 
+(defn refine
+  ([env t]
+   (let [pos (tree/position env)
+         target (target-node env)]
+     (if-let [refine (get target :refine)]
+       (-> (refine target t)
+           (tree/at pos))
+       (u/throw [::refine "no :refine fields at:" pos]))))
+  ([env at t]
+   (tree/upd env
+             (path/path at)
+             #(refine % t))))
+
+(defn on-void
+  ([env f]
+   (let [pos (tree/position env)
+         target (target-node env)]
+     (-> (update target :refine
+                 (fn [r] (fn [env t]
+                          (let [refined (r env t)]
+                            (if (= types/void refined)
+                              (f refined)
+                              refined)))))
+         (tree/at pos))))
+  ([env at f]
+   (tree/upd env
+             (path/path at)
+             #(on-void % f))))
+
+(defn bubbling-void
+  [env at]
+  (on-void env at (fn [env'] (tree/at (refine (tree/parent env') types/void)
+                                     (path/path at)))))
+
+(defn bind-bubbling-void
+  ([env at x]
+   (-> (bind env at x)
+       (bubbling-void at)))
+  ([env at x & xs]
+   (reduce-kv bind-bubbling-void
+              (bind-bubbling-void env at x)
+              (partition 2 xs))))
+
 (def ENV0
 
   (-> {}
@@ -199,11 +255,11 @@
       (tree/put '[value]
                 {:bind
                  (fn [env [v]]
-                   (let [type (u/simple-type v)]
-                     (assoc env
-                            :value v
-                            :type type
-                            type true)))})
+                   (assoc env
+                          :value v
+                          :type (types/single v)
+                          :refine (fn [env t]
+                                    (update env :type types/intersect t))))})
 
       (tree/put '[external]
                 {:interpret
@@ -235,7 +291,7 @@
                    (if (composite/composed? expr)
                      (bind env (composite/expand-seq expr))
                      (-> (reduce (fn [env [idx subexpr]]
-                                   (bind env idx subexpr))
+                                   (bind-bubbling-void env idx subexpr))
                                  (assoc env :s-expr expr)
                                  (map-indexed vector expr))
                          (assoc
@@ -264,7 +320,7 @@
 
                          bound
                          (reduce (fn [e [sym expr]]
-                                   (-> (bind e sym expr)
+                                   (-> (bind-bubbling-void e sym expr)
                                        (tree/put [sym] :local true)))
                                  env bindings)]
 
@@ -428,7 +484,7 @@
 
                  :bind
                  (fn [env [test then else]]
-                   (-> (bind env 0 test 1 then 2 else)
+                   (-> (bind-bubbling-void env 0 test 1 then 2 else)
                        (assoc :if (list 'if test then else)
                               :build
                               (fn [env]
@@ -453,7 +509,7 @@
                  (fn [env xs]
                    (if (composite/composed? xs)
                      (bind env (composite/expand-vec xs))
-                     (-> (reduce (fn [e [i v]] (bind e [i] v))
+                     (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
                                  (assoc env :vector true)
                                  (map-indexed vector xs))
                          (assoc :build
@@ -468,8 +524,8 @@
 
                  :bind
                  (fn [env [k v]]
-                   (bind (assoc env :map-entry true)
-                         0 k 1 v))})
+                   (bind-bubbling-void (assoc env :map-entry true)
+                                       0 k 1 v))})
 
       (tree/put '[hash-map]
                 {:interpret
@@ -481,7 +537,7 @@
                    (let [hm (into {} xs)]
                      (if (composite/composed? hm)
                        (bind env (composite/expand-map hm))
-                       (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
+                       (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
                                    (assoc env :hash-map true)
                                    (map-indexed vector xs))
                            (assoc
@@ -492,7 +548,7 @@
                                    (into {}))))))))})
 
       ;; multi functions
-      (tree/put '[multi-fn simple]
+      #_(tree/put '[multi-fn simple]
                 {:interpret
                  (fn [_ _]
                    (u/throw [:multi-fn.simple.evalutate :not-implemented]))
@@ -517,7 +573,59 @@
                                                               {:link (conj (tree/position env) idx)})
                                                     (recur cs))
                                                   (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                             (map-indexed vector implementations))))})))
+                             (map-indexed vector implementations))))})
+
+
+      ;; type hint
+      (tree/put '[the]
+                {:bind
+                 (fn [env [t v]]
+                   (refine (bind env v)
+                           (deref (resolve (symbol "immucode.types" (str t))))))})
+
+      ;; typed functions try
+      (tree/put '[types annotate]
+                {:bind
+                 (fn [env [fsym operand-types return-type]]
+                   (assert (resolve fsym)
+                           "annotate only works on external functions")
+                   (tree/put env [fsym]
+                             {:bind
+                              (fn [env [_ & operands]]
+                                ())}))})
+
+      (tree/put '[types cond]
+                {:notes
+                 '["like a cond where tests cases can fail eliminating the whole branch at bind time"
+                   (types.cond
+                    (the number x) (+ x x)
+                    (the string x) (str x x))
+                   "if x is known to be number at bind time this expression will be substituted by"
+                   (+ x x)
+                   "if not it will need to be compiled to something like"
+                   (? (number? x) (+ x x)
+                      (string? x) (str x x))
+
+
+
+
+                   "if all tests are void the whole form is void"
+
+                   ]
+
+                 :bind (fn [env cases]
+                         ())})
+
+      (tree/put '[add]
+                {:bind
+                 (fn [env [a b]]
+                   (let [env' (-> (bind env [1] a) (refine [1] types/number))]
+                     (if (= types/void (resolve-key (tree/at env' [1]) :type))
+                       (u/throw [::type-error "first argument of 'add is not a number: "])
+                       (let [env'' (-> (bind env' [2] b) (refine [2] types/number))]
+                         (if (= types/void (resolve-key (tree/at env'' [2]) :type))
+                           (u/throw [::type-error "second argument of 'add is not a number: "])
+                           (bind env'' [0] `+))))))})))
 
 (defn bind-prog
   [body]
@@ -670,13 +778,13 @@
             (prog x 1 y :foo z {y x}
                   {:a 3 . z}))
 
-        (do :multi-fn
-            (prog mf (multi-fn.simple [x y]
-                                      [:number :number] (+ x y)
-                                      [:string :string] (str x y))
-                  n (mf 1 2)
-                  s (mf "io " "gro.")
-                  [n s]))
+        #_(do :multi-fn
+              (prog mf (multi-fn.simple [x y]
+                                        [:number :number] (+ x y)
+                                        [:string :string] (str x y))
+                    n (mf 1 2)
+                    s (mf "io " "gro.")
+                    [n s]))
 
         (do :destructure
             (prog (let [[x . xs] (range 10)]
@@ -708,4 +816,12 @@
         (do :control
 
             (bind ENV0 'x '(? (pos? 1) :ok :ko))
-            (prog (? (pos? 1) :ok :ko)))))
+            (prog (? (pos? 1) :ok :ko)))
+
+        (do :type-hint
+
+            (prog (let [x 1]
+                    (the number x)))
+
+            (prog (let [x 1]
+                    (the string x))))))

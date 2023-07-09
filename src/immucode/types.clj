@@ -726,8 +726,6 @@
          (compare (tuple [number string])
                   (tuple [integer string]))
          (compare (length 3)
-                  (unchecked-intersection vector (length 3)))
-         (compare vector
                   (unchecked-intersection vector (length 3))))
       (= :smaller
          (compare (tuple [integer string])

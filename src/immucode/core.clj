@@ -8,7 +8,8 @@
             [immucode.quote :as quote]
             [immucode.types :as types]
             [clojure.string :as str]
-            [immucode.control :as control]))
+            [immucode.control :as control]
+            [clojure.core :as c]))
 
 (do :help
 
@@ -204,28 +205,35 @@
       (list 'let (vec bindings) (build env))
       (build env))))
 
+(defn default-refine-method [env t]
+  (update env :type (fnil types/intersect types/any) t))
+
 (defn refine
   ([env t]
    (let [pos (tree/position env)
          target (target-node env)]
-     (if-let [refine (get target :refine)]
-       (-> (refine target t)
-           (tree/at pos))
-       (u/throw [::refine "no :refine fields at:" pos]))))
+     (let [f (get target :refine default-refine-method)]
+       (-> (f target t)
+           (tree/at pos)))))
   ([env at t]
    (tree/upd env
              (path/path at)
              #(refine % t))))
 
 (defn on-void
+  "install a function to call when the target node is refined to void
+   this function will accept two arguments
+   - the env prior to the refinement yeilding to void
+   - the env refined to void"
   ([env f]
    (let [pos (tree/position env)
          target (target-node env)]
      (-> (update target :refine
                  (fn [r] (fn [env t]
-                          (let [refined (r env t)]
+                          (let [refine (or r default-refine-method)
+                                refined (refine env t)]
                             (if (= types/void refined)
-                              (f refined)
+                              (f env refined)
                               refined)))))
          (tree/at pos))))
   ([env at f]
@@ -234,18 +242,21 @@
              #(on-void % f))))
 
 (defn bubbling-void
+  "when an inner node is refined to void, it makes its parent void."
   [env at]
-  (on-void env at (fn [env'] (tree/at (refine (tree/parent env') types/void)
-                                     (path/path at)))))
+  (on-void env at (fn [_ refined]
+                    (tree/at (refine (tree/parent refined) types/void)
+                             (path/path at)))))
 
 (defn bind-bubbling-void
+  "simple combination of bind -> bubling-void"
   ([env at x]
    (-> (bind env at x)
        (bubbling-void at)))
   ([env at x & xs]
-   (reduce-kv bind-bubbling-void
-              (bind-bubbling-void env at x)
-              (partition 2 xs))))
+   (reduce (fn [env [at x]] (bind-bubbling-void env at x))
+           (bind-bubbling-void env at x)
+           (partition 2 xs))))
 
 (def ENV0
 
@@ -405,6 +416,7 @@
                                return-expression)
 
                          (assoc
+                          ;; TODO should I add a bind function here and refine the argument at bind time ??
                           :build
                           (fn lambda-instance-build [env]
                             (let [return (build (tree/at env return-path))]
@@ -494,7 +506,8 @@
 
       (tree/put '[?]
                 {:interpret
-                 ()
+                 (fn [env arg]
+                   (u/throw [:no-implementation '? :interpret]))
                  :bind
                  (fn [env args]
                    (bind env (control/emit-form args)))})
@@ -549,31 +562,31 @@
 
       ;; multi functions
       #_(tree/put '[multi-fn simple]
-                {:interpret
-                 (fn [_ _]
-                   (u/throw [:multi-fn.simple.evalutate :not-implemented]))
+                  {:interpret
+                   (fn [_ _]
+                     (u/throw [:multi-fn.simple.evalutate :not-implemented]))
 
-                 :bind
-                 (fn [env [argv & cases]]
-                   (let [predicates (take-nth 2 cases)
-                         implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
-                     (reduce (fn [e [idx impl]] (bind e idx impl))
-                             (assoc env
-                                    :multi-fn true
-                                    :predicates predicates
-                                    :bind (fn [env2 args]
-                                            (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                  subenvs (next (sequential-children returned-env))
-                                                  arg-check (fn [check arg] (or (= '_ check) (check arg)))
-                                                  match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
-                                              (loop [candidates (map-indexed vector predicates)]
-                                                (if-let [[[idx pred] & cs] (seq candidates)]
-                                                  (if (match? pred subenvs)
-                                                    (assoc-in returned-env [::tree/node 0]
-                                                              {:link (conj (tree/position env) idx)})
-                                                    (recur cs))
-                                                  (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                             (map-indexed vector implementations))))})
+                   :bind
+                   (fn [env [argv & cases]]
+                     (let [predicates (take-nth 2 cases)
+                           implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
+                       (reduce (fn [e [idx impl]] (bind e idx impl))
+                               (assoc env
+                                      :multi-fn true
+                                      :predicates predicates
+                                      :bind (fn [env2 args]
+                                              (let [returned-env (bind env2 (cons :implementation-placeholder args))
+                                                    subenvs (next (sequential-children returned-env))
+                                                    arg-check (fn [check arg] (or (= '_ check) (check arg)))
+                                                    match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
+                                                (loop [candidates (map-indexed vector predicates)]
+                                                  (if-let [[[idx pred] & cs] (seq candidates)]
+                                                    (if (match? pred subenvs)
+                                                      (assoc-in returned-env [::tree/node 0]
+                                                                {:link (conj (tree/position env) idx)})
+                                                      (recur cs))
+                                                    (u/throw [:multi-fn.simple :no-dispatch args]))))))
+                               (map-indexed vector implementations))))})
 
 
       ;; type hint
@@ -581,6 +594,7 @@
                 {:bind
                  (fn [env [t v]]
                    (refine (bind env v)
+                           ;; TODO we should allow more type that those primitives
                            (deref (resolve (symbol "immucode.types" (str t))))))})
 
       ;; typed functions try
@@ -589,10 +603,13 @@
                  (fn [env [fsym operand-types return-type]]
                    (assert (resolve fsym)
                            "annotate only works on external functions")
-                   (tree/put env [fsym]
-                             {:bind
-                              (fn [env [_ & operands]]
-                                ())}))})
+                   (let [arity (count operand-types)
+                         argv (vec (repeatedly arity gensym))]
+                     (println (list 'fn argv
+                                     (list 'the return-type (cons fsym (map (fn [t x] (list 'the t x)) operand-types argv))))
+                              )
+                     (bind env (list 'fn argv
+                                     (list 'the return-type (cons fsym (map (fn [t x] (list 'the t x)) operand-types argv)))))))})
 
       (tree/put '[types cond]
                 {:notes
@@ -605,16 +622,38 @@
                    "if not it will need to be compiled to something like"
                    (? (number? x) (+ x x)
                       (string? x) (str x x))
-
-
-
-
                    "if all tests are void the whole form is void"
 
                    ]
 
                  :bind (fn [env cases]
-                         ())})
+                         (let [couples (partition 2 cases)
+                               ]))})
+
+      (tree/put '[types branch]
+                {:notes
+                 '["before cond there is this simpler form to explore"
+                   (types.branch
+                    (+ x x)
+                    (str x "pouet"))
+                   "each of the given expressions could be eliminated if void"
+                   "the first non void will be built"]
+
+                 :bind
+                 (fn types-branch-bind
+                   [env exprs]
+                   (if (seq exprs)
+                     (let [on-void-fn
+                           (fn [initial refined]
+                             (bind ))]
+                       (-> (bind env (first exprs))
+                           (update :refine
+                                   (fn [f] (fn [env t] (let [env' (f env t)]
+                                                       (if (void-node? env')
+                                                         (refine (types-branch-bind env (next exprs))
+                                                                 t)
+                                                         env')))))))
+                     ()))})
 
       (tree/put '[add]
                 {:bind
@@ -644,6 +683,14 @@
 (defmacro prog'
   [& body]
   `(bind-prog ~(mapv quote/quote-wrap body)))
+
+(compile (prog' add2 (types.annotate c/+ [number number] number)
+        (add2 1 "23")))
+
+#_(prog (+ (the number 1) 2))
+#_(prog incinc (fn [x] (+ (the number x) 2))
+      (incinc "2"))
+
 
 (do :tries
 
@@ -823,5 +870,5 @@
             (prog (let [x 1]
                     (the number x)))
 
-            (prog (let [x 1]
-                    (the string x))))))
+            '(should-throw (prog (let [x 1]
+                                   (the string x)))))))

@@ -132,7 +132,7 @@
     (fn [t]
       (f t))))
 
-(do :checks
+'(do :checks
 
     (assert (= (intersect (from-pred :vec vector?)
                           [1 2 3])

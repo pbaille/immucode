@@ -178,7 +178,7 @@
 (defn build
   [env]
   (cond
-    (void-node? env) (u/throw [::build "node is void !"])
+    (void-node? env) (u/throw [::build "node is void !" (tree/show env)])
      ; handling falsy values
     (contains? env :value) (get env :value)
     :else
@@ -601,15 +601,17 @@
       (tree/put '[types annotate]
                 {:bind
                  (fn [env [fsym operand-types return-type]]
-                   (assert (resolve fsym)
-                           "annotate only works on external functions")
-                   (let [arity (count operand-types)
-                         argv (vec (repeatedly arity gensym))]
-                     (println (list 'fn argv
-                                     (list 'the return-type (cons fsym (map (fn [t x] (list 'the t x)) operand-types argv))))
-                              )
-                     (bind env (list 'fn argv
-                                     (list 'the return-type (cons fsym (map (fn [t x] (list 'the t x)) operand-types argv)))))))})
+                   (let [resolved (resolve fsym)]
+                     (assert resolved "annotate only works on external functions")
+                     (assoc env :bind
+                            (fn [env args]
+                              (assoc (reduce (fn [env [idx typed-arg]]
+                                               (bind-bubbling-void env idx typed-arg))
+                                             env (->> (map (fn [t x] (list 'the t x)) operand-types args)
+                                                      (map-indexed vector)))
+                                     :build
+                                     (fn [env]
+                                       (cons resolved (mapv build (sequential-children env)))))))))})
 
       (tree/put '[types cond]
                 {:notes
@@ -684,8 +686,11 @@
   [& body]
   `(bind-prog ~(mapv quote/quote-wrap body)))
 
-(compile (prog' add2 (types.annotate c/+ [number number] number)
-        (add2 1 "23")))
+(comment :types.annotate
+  (compile (prog' add2 (types.annotate c/+ [number number] number)
+                 (add2 1 "23"))))
+
+
 
 #_(prog (+ (the number 1) 2))
 #_(prog incinc (fn [x] (+ (the number x) 2))

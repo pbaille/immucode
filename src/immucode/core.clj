@@ -178,7 +178,7 @@
 (defn build
   [env]
   (cond
-    (void-node? env) (u/throw [::build "node is void !" (tree/show env)])
+    (void-node? env) (u/throw [::build :void-node (tree/show env)])
      ; handling falsy values
     (contains? env :value) (get env :value)
     :else
@@ -655,18 +655,7 @@
                                                          (refine (types-branch-bind env (next exprs))
                                                                  t)
                                                          env')))))))
-                     ()))})
-
-      (tree/put '[add]
-                {:bind
-                 (fn [env [a b]]
-                   (let [env' (-> (bind env [1] a) (refine [1] types/number))]
-                     (if (= types/void (resolve-key (tree/at env' [1]) :type))
-                       (u/throw [::type-error "first argument of 'add is not a number: "])
-                       (let [env'' (-> (bind env' [2] b) (refine [2] types/number))]
-                         (if (= types/void (resolve-key (tree/at env'' [2]) :type))
-                           (u/throw [::type-error "second argument of 'add is not a number: "])
-                           (bind env'' [0] `+))))))})))
+                     ()))})))
 
 (defn bind-prog
   [body]

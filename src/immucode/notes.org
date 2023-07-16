@@ -196,3 +196,20 @@ this simple add function could be written in several ways
     (is y number)]
   (the number (+ x y)))
 #+end_src
+** <2023-07-09 Sun>
+reprise after long break
+still need to think about type propagation
+types ns is kind of useful, have to wire it properly into core
+*** do we really need =bubling-void= ?
+maybe the parent should be in charge to handle the refinement of iots children
+we should still need some kind of reaction for the case a child is refined externally
+
+*** DONE typed functions
+for now functions are regular value that gets build an applied when found in verb position
+typed functions need actually to do some work at bind time
+for this, function instances should expose a bind method
+see [[file:core.clj::(tree/put '\[types annotate\]][types.annotate]]
+
+*** TODO refinement bubbling
+parent should maybe install listeners on their childs for when they are refined.
+the bubbling-void stuff should go away now.

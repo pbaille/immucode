@@ -13,60 +13,99 @@
 
 (do :help
 
-    (defn append1 [l x]
-      (concat l (list x)))
+    (do :misc
 
-    (defn path->binding-symbol [p]
-      (symbol (str/join "_" p)))
+        (defn append1 [l x]
+          (concat l (list x)))
 
-    (defn var->qualified-symbol [v]
-      (let [{:keys [ns name]} (meta v)]
-        (symbol (str ns) (str name))))
+        (defn path->binding-symbol [p]
+          (symbol (str/join "_" p)))
 
-    (defn env->var-sym [env]
-      (path->binding-symbol (tree/position env)))
+        (defn var->qualified-symbol [v]
+          (let [{:keys [ns name]} (meta v)]
+            (symbol (str ns) (str name))))
 
-    (defn cd [env sym]
-      (tree/cd env (path/path sym)))
+        (defn pairs&return [xs]
+          (if (odd? (count xs))
+            [(partition 2 (butlast xs)) (last xs)]
+            [(partition 2 xs) nil])))
 
-    (defn bubfind [env x]
-      (if (and (symbol? x)
-               (not (namespace x)))
-        (tree/find env (path/path x))))
+    (do :env
 
-    (defn env-get [env at]
-      (tree/cd (tree/root env) (path/path at)))
+        (defn deps-merge [old new]
+          (concat new (remove (set new) old)))
 
-    (defn target-node [env]
-      (if-let [link (:link env)]
-        (target-node (tree/at env link))
-        env))
+        (defn env->var-sym [env]
+          (path->binding-symbol (tree/position env)))
 
-    (defn resolve-key [env k]
-      (get (target-node env) k))
+        (defn cd [env sym]
+          (tree/cd env (path/path sym)))
 
-    (defn pairs&return [xs]
-      (if (odd? (count xs))
-        [(partition 2 (butlast xs)) (last xs)]
-        [(partition 2 xs) nil]))
+        (defn bubfind [env x]
+          (if (and (symbol? x)
+                   (not (namespace x)))
+            (tree/find env (path/path x))))
 
-    (defn deps-merge [old new]
-      (concat new (remove (set new) old)))
+        (defn env-get [env at]
+          (tree/cd (tree/root env) (path/path at)))
 
-    (defn sequential-children
-      [env]
-      (->> (tree/children env)
-           (filter (comp int? ::tree/name))
-           (sort-by ::tree/name)))
+        (defn target-node [env]
+          (if-let [link (:link env)]
+            (target-node (tree/at env link))
+            env))
 
-    (defn target-type [env]
-      (let [target (target-node env)]
-        (or (get target :type)
-            (some-> target :value types/single)
-            types/any)))
+        (defn resolve-key [env k]
+          (get (target-node env) k))
 
-    (defn void-node? [env]
-      (= types/void (target-type env))))
+        (defn sequential-children
+          [env]
+          (->> (tree/children env)
+               (filter (comp int? ::tree/name))
+               (sort-by ::tree/name)))
+
+        (defn target-type [env]
+          (let [target (target-node env)]
+            (or (get target :type)
+                (some-> target :value types/single)
+                types/any)))
+
+        (defn void-node? [env]
+          (= types/void (target-type env)))
+
+        (defn copy-node
+          "copy the node at 'from' location to 'to' location.
+       changing all its inner links and references accordingly."
+          [env from to]
+          "this will not really work, because methods often closes over some location related values"
+          #_(assert (empty? (tree/at env to))
+                    [::copy-node "target location already exists." (tree/show (tree/at env to))])
+          (let [path-move (fn [p] (if-let [unprefixed (path/remove-prefix p from)]
+                                   (path/path to unprefixed)
+                                   p))
+                walked (tree/bf-walk (tree/at env from)
+                                     (fn [node]
+                                       (cond
+                                         (:link node) (update node :link path-move)
+                                         (:referenced-by node) (update node :referenced-by (partial mapv path-move))
+                                         :else node)))]
+            (-> (assoc-in (tree/root env)
+                          (tree/subnode-path to)
+                          (dissoc walked ::tree/parent))
+                (tree/at (tree/position env)))))
+
+        (defn occur-check
+          [env p]
+          (or
+           (= (:link env) p)
+           (loop [xs (tree/children env)]
+             (when-let [[x & xs] (seq xs)]
+               (or (occur-check x p)
+                   (recur xs))))))
+
+        (defn recursive-node? [env]
+          (let [pos (tree/position env)]
+            (some (fn [c] (occur-check c pos))
+                  (tree/children env))))))
 
 (defn bind
 
@@ -184,11 +223,10 @@
     :else
     (if-let [build (:build env)]
       (build env)
-      (if-let [target-path (:link env)]
-        (let [target (tree/at env target-path)]
-          (if (:local target)
-            (last target-path)
-            (path->binding-symbol target-path)))
+      (if-let [target (target-node env)]
+        (if (:local target)
+          (last (tree/position target))
+          (path->binding-symbol (tree/position target)))
         (u/throw [::build "no :build nor :value fields at:"
                   (tree/position env)])))))
 
@@ -205,486 +243,489 @@
       (list 'let (vec bindings) (build env))
       (build env))))
 
-(defn default-refine-method [env t]
-  (update env :type (fnil types/intersect types/any) t))
+(do :refine
 
-(defn refine
-  ([env t]
-   (let [pos (tree/position env)
-         target (target-node env)]
-     (let [f (get target :refine default-refine-method)]
-       (-> (f target t)
-           (tree/at pos)))))
-  ([env at t]
-   (tree/upd env
-             (path/path at)
-             #(refine % t))))
+    (defn default-refine-method [env t]
+      (update env :type (fnil types/intersect types/any) t))
 
-(defn on-void
-  "install a function to call when the target node is refined to void
+    (defn refine
+      ([env t]
+       (let [pos (tree/position env)
+             target (target-node env)]
+         (let [f (get target :refine default-refine-method)]
+           (-> (f target t)
+               (tree/at pos)))))
+      ([env at t]
+       (tree/upd env
+                 (path/path at)
+                 #(refine % t))))
+
+    (do :void-handling
+
+        (defn on-void
+          "install a function to call when the target node is refined to void
    this function will accept two arguments
    - the env prior to the refinement yeilding to void
    - the env refined to void"
-  ([env f]
-   (let [pos (tree/position env)
-         target (target-node env)]
-     (-> (update target :refine
-                 (fn [r] (fn [env t]
-                          (let [refine (or r default-refine-method)
-                                refined (refine env t)]
-                            (if (= types/void refined)
-                              (f env refined)
-                              refined)))))
-         (tree/at pos))))
-  ([env at f]
-   (tree/upd env
-             (path/path at)
-             #(on-void % f))))
+          ([env f]
+           (let [pos (tree/position env)
+                 target (target-node env)]
+             (-> (update target :refine
+                         (fn [r] (fn [env t]
+                                  (println "refined " t)
+                                  (let [refine (or r default-refine-method)
+                                        refined (refine env t)]
+                                    (if (= types/void (:type refined))
+                                      (f env refined)
+                                      refined)))))
+                 (tree/at pos))))
+          ([env at f]
+           (tree/upd env
+                     (path/path at)
+                     #(on-void % f))))
 
-(defn bubbling-void
-  "when an inner node is refined to void, it makes its parent void."
-  [env at]
-  (on-void env at (fn [_ refined]
-                    (tree/at (refine (tree/parent refined) types/void)
-                             (path/path at)))))
+        (defn bubbling-void
+          "when an inner node is refined to void, it makes its parent void."
+          [env at]
+          (on-void env at (fn [_ refined]
+                            (tree/at (refine (tree/parent refined) types/void)
+                                     (path/path at)))))
 
-(defn bind-bubbling-void
-  "simple combination of bind -> bubling-void"
-  ([env at x]
-   (-> (bind env at x)
-       (bubbling-void at)))
-  ([env at x & xs]
-   (reduce (fn [env [at x]] (bind-bubbling-void env at x))
-           (bind-bubbling-void env at x)
-           (partition 2 xs))))
+        (defn bind-bubbling-void
+          "simple combination of bind -> bubling-void"
+          ([env at x]
+           (-> (bind env at x)
+               (bubbling-void at)))
+          ([env at x & xs]
+           (reduce (fn [env [at x]] (bind-bubbling-void env at x))
+                   (bind-bubbling-void env at x)
+                   (partition 2 xs))))))
 
-(def ENV0
+(do :env*
 
-  (-> {}
+    (def env* (atom {}))
 
-      ;; base
-      (tree/put '[value]
-                {:bind
-                 (fn [env [v]]
-                   (assoc env
-                          :value v
-                          :type (types/single v)
-                          :refine (fn [env t]
-                                    (update env :type types/intersect t))))})
+    (defmacro defprim [name & kvs]
+      `(swap! env* tree/put (path/path '~name)
+              (hash-map ::primitive true ~@kvs)))
 
-      (tree/put '[external]
-                {:interpret
-                 (fn [env [sym]]
-                   (if-let [resolved (resolve sym)]
-                     (deref resolved)
-                     (u/throw [:unresolvable sym :in env])))
-                 :bind
-                 (fn [env [sym]]
-                   (if-let [resolved (resolve sym)]
-                     (if (= resolved #'clojure.core/unquote)
-                       (bind env 'eval)
-                       (assoc env
-                              :external resolved
-                              :build (fn [_] (var->qualified-symbol resolved))))
-                     (u/throw [:unresolvable sym :in env])))})
+    (defn bind-prog
+      [body]
+      (if (even? (count body))
+        (u/throw [::prog "no return expression." (cons `prog body)])
+        (let [[pairs return] (pairs&return body)
+              return-symbol (gensym "ret_")
+              bindings (conj (vec pairs) [return-symbol return])
+              bound (reduce (fn [e [s v]] (bind e s v)) @env* bindings)]
+          (cd bound return-symbol))))
 
-      (tree/put '[s-expr]
-                {:interpret
-                 (fn s-expr-interpret [env expr]
-                   (if (composite/composed? expr)
-                     (interpret env (composite/expand-seq expr))
-                     (let [[verb & args]
-                           (map (partial interpret env) expr)]
-                       (apply verb args))))
+    (defmacro prog
+      [& body]
+      (compile (bind-prog body)))
 
-                 :bind
-                 (fn s-expr-bind [env expr]
-                   (if (composite/composed? expr)
-                     (bind env (composite/expand-seq expr))
-                     (-> (reduce (fn [env [idx subexpr]]
-                                   (bind-bubbling-void env idx subexpr))
-                                 (assoc env :s-expr expr)
-                                 (map-indexed vector expr))
-                         (assoc
-                          :build
-                          (fn s-expr-instance-build [env]
-                            (map build (sequential-children env)))))))})
+    (defn dbg [env]
+      [:at (tree/position env)
+       :env (-> (tree/root env)
+                (update ::tree/node
+                        (fn [children] (->> children
+                                           (remove (comp ::primitive val))
+                                           (into {}))))
+                (tree/bf-walk (fn [node] (dissoc node :bind :build :interpret :refine :referenced-by))))])
 
-      ;; let
-      (tree/put '[let1]
-                {:interpret
-                 (fn let1-interpret
-                   [env [[pattern expr] return]]
-                   (-> (reduce (fn [e [argsym argval]]
-                                 (tree/put e [argsym] :value (interpret e argval)))
-                               env (partition 2 (destructure/bindings pattern expr {})))
-                       (interpret return)))
+    (defmacro prog'
+      [& body]
+      `(dbg (bind-prog ~(mapv quote/quote-wrap body))))
 
-                 :bind
-                 (fn let1-bind
-                   [env [[pattern expr] return :as args]]
+    (do :extension
 
-                   (let [return-symbol '__return__
+        ;; base
+        (defprim value
+          :bind
+          (fn [env [v]]
+            (assoc env
+                   :value v
+                   :type (types/single v)
+                   :refine (fn [env t]
+                             (update env :type types/intersect t)))))
 
-                         bindings
-                         (partition 2 (destructure/bindings pattern expr {}))
+        (defprim external
+          :interpret
+          (fn [env [sym]]
+            (if-let [resolved (resolve sym)]
+              (deref resolved)
+              (u/throw [:unresolvable sym :in env])))
+          :bind
+          (fn [env [sym]]
+            (if-let [resolved (resolve sym)]
+              (if (= resolved #'clojure.core/unquote)
+                (bind env 'eval)
+                (assoc env
+                       :external resolved
+                       :build (fn [_] (var->qualified-symbol resolved))))
+              (u/throw [:unresolvable sym :in env]))))
 
-                         bound
-                         (reduce (fn [e [sym expr]]
-                                   (-> (bind-bubbling-void e sym expr)
-                                       (tree/put [sym] :local true)))
-                                 env bindings)]
+        (defprim s-expr
+          :interpret
+          (fn s-expr-interpret [env expr]
+            (if (composite/composed? expr)
+              (interpret env (composite/expand-seq expr))
+              (let [[verb & args]
+                    (map (partial interpret env) expr)]
+                (apply verb args))))
 
-                     (-> (bind bound
-                               return-symbol
-                               return)
+          :bind
+          (fn s-expr-bind [env expr]
+            (if (composite/composed? expr)
+              (bind env (composite/expand-seq expr))
+              (-> (reduce (fn [env [idx subexpr]]
+                            (bind-bubbling-void env idx subexpr))
+                          (assoc env :s-expr expr)
+                          (map-indexed vector expr))
+                  (assoc
+                   :build
+                   (fn s-expr-instance-build [env]
+                     (map build (sequential-children env))))))))
 
-                         (assoc
-                          :let1 (cons 'let1 args)
-                          :build
-                          (fn let1-instance-build [env]
-                            (let [bindings
-                                  (map (fn [sym]
-                                         [sym (build (cd env sym))])
-                                       (map first bindings))]
-                              (list 'let
-                                    (reduce into [] bindings)
-                                    (build (cd env return-symbol)))))))))})
+        ;; let
+        (defprim let1
+          :interpret
+          (fn let1-interpret
+            [env [[pattern expr] return]]
+            (-> (reduce (fn [e [argsym argval]]
+                          (tree/put e [argsym] :value (interpret e argval)))
+                        env (partition 2 (destructure/bindings pattern expr {})))
+                (interpret return)))
 
-      (tree/put '[let]
-                ;; TODO add named let (using lambda)
-                {:interpret
-                 (fn let-interpret [env [bindings return]]
-                   (interpret env
-                              (reduce (fn [ret binding] (list 'let1 binding ret))
-                                      return (reverse (partition 2 bindings)))))
+          :bind
+          (fn let1-bind
+            [env [[pattern expr] return :as args]]
 
-                 :bind
-                 (fn let-bind [env [bindings return]]
-                   (bind env
-                         (reduce (fn [ret binding] (list 'let1 binding ret))
-                                 return (reverse (partition 2 bindings)))))})
+            (let [return-symbol '__return__
 
-      ;; lambda
-      (tree/put '[fn]
-                {:interpret
-                 (fn [env [argv return]]
-                   (fn [& xs]
-                     ;; TODO add recursion
-                     (-> (reduce (fn [e [argsym argval]]
-                                   (tree/put e [argsym] :value argval))
-                                 env (zipmap argv xs))
-                         (interpret return))))
+                  bindings
+                  (partition 2 (destructure/bindings pattern expr {}))
 
-                 :bind
-                 (fn [env [argv return]]
+                  bound
+                  (reduce (fn [e [sym expr]]
+                            (-> (bind-bubbling-void e sym expr)
+                                (tree/put [sym] :local true)))
+                          env bindings)]
 
-                   (let [form (list 'fn argv return)
-                         position (tree/position env)
-                         fn-name (last position)
-                         return-symbol '__return__
-                         return-path (conj position return-symbol)
+              (-> (bind bound
+                        return-symbol
+                        return)
 
-                         arguments
-                         (map-indexed (fn [idx p]
-                                        (if (symbol? p)
-                                          {:symbol p}
-                                          {:symbol (gensym (str "arg" idx))
-                                           :destructure p}))
-                                      argv)
+                  (assoc
+                   :let1 (cons 'let1 args)
+                   :build
+                   (fn let1-instance-build [env]
+                     (let [bindings
+                           (map (fn [sym]
+                                  [sym (build (cd env sym))])
+                                (map first bindings))]
+                       (list 'let
+                             (reduce into [] bindings)
+                             (build (cd env return-symbol))))))))))
 
-                         argument-symbols
-                         (mapv :symbol arguments)
+        (defprim let
+          ;; TODO add named let (using lambda)
+          :interpret
+          (fn let-interpret [env [bindings return]]
+            (interpret env
+                       (reduce (fn [ret binding] (list 'let1 binding ret))
+                               return (reverse (partition 2 bindings)))))
 
-                         with-locals
-                         (reduce (fn [e a]
-                                   (tree/put e [a] :local a))
-                                 (assoc env :lambda form)
-                                 (cons fn-name argument-symbols))
+          :bind
+          (fn let-bind [env [bindings return]]
+            (bind env
+                  (reduce (fn [ret binding] (list 'let1 binding ret))
+                          return (reverse (partition 2 bindings))))))
 
-                         destructuration-bindings
-                         (mapcat (juxt :destructure :symbol)
-                                 (filter :destructure arguments))
+        ;; lambda
+        (defprim fn
+          :interpret
+          (fn [env [argv return]]
+            (fn [& xs]
+              ;; TODO add recursion
+              (-> (reduce (fn [e [argsym argval]]
+                            (tree/put e [argsym] :value argval))
+                          env (zipmap argv xs))
+                  (interpret return))))
 
-                         return-expression
-                         (if (seq destructuration-bindings)
-                           (list 'let destructuration-bindings return)
-                           return)]
+          :bind
+          (fn [env [argv return]]
 
-                     (-> (bind with-locals
-                               return-symbol
-                               return-expression)
+            (let [form (list 'fn argv return)
+                  position (tree/position env)
+                  fn-name (last position)
+                  return-symbol '__return__
+                  return-path (conj position return-symbol)
 
-                         (assoc
-                          ;; TODO should I add a bind function here and refine the argument at bind time ??
-                          :build
-                          (fn lambda-instance-build [env]
-                            (let [return (build (tree/at env return-path))]
-                              (if (symbol? fn-name)
-                                (list 'fn fn-name argument-symbols return)
-                                (list 'fn argument-symbols return))))))))})
+                  arguments
+                  (map-indexed (fn [idx p]
+                                 (if (symbol? p)
+                                   {:symbol p}
+                                   {:symbol (gensym (str "arg" idx))
+                                    :destructure p}))
+                               argv)
 
-      ;; module
-      (tree/put '[module]
-                {:interpret ()
-                 :bind (fn [env args]
-                         (let [env (assoc env :module true)]
-                           (if (vector? (first args))
-                             (assoc env
-                                    :parametric true
-                                    :bind (fn [env2 parameters]
-                                            (-> (reduce (fn [e [sym expr]] (bind e sym expr))
-                                                        env2 (map vector (first args) parameters))
-                                                (bind (cons 'module (next args))))))
-                             (apply bind env args))))})
+                  argument-symbols
+                  (mapv :symbol arguments)
 
-      ;; eval
-      (tree/put '[eval]
-                {:interpret
-                 (fn [env [expr]]
-                   (interpret env expr))
-                 :bind
-                 (fn [env [expr]]
-                   (bind env (interpret env expr)))})
+                  with-locals
+                  (reduce (fn [e a]
+                            (bubbling-void (tree/put e [a] :local a)
+                                           [a]))
+                          (assoc env :lambda form)
+                          (cons fn-name argument-symbols))
 
-      ;; mac
-      (tree/put '[mac]
-                {:bind
-                 (fn [env [argv return]]
-                   (let [expand (interpret env (list 'fn argv return))]
-                     (assoc env
-                            :interpret
-                            (fn [env args]
-                              (interpret env (expand env args)))
-                            :bind
-                            (fn [env args]
-                              (bind env (expand env args))))))})
+                  destructuration-bindings
+                  (mapcat (juxt :destructure :symbol)
+                          (filter :destructure arguments))
 
-      ;; binder
-      (tree/put '[binder]
-                {:bind
-                 (fn [env [argv return]]
-                   (let [f (interpret env (list 'fn argv return))]
-                     (assoc env
-                            :interpret (comp evaluate f)
-                            :bind f)))})
+                  return-expression
+                  (if (seq destructuration-bindings)
+                    (list 'let destructuration-bindings return)
+                    return)
 
-      ;; quote
-      (tree/put '[quote]
-                {:interpret
-                 (fn [_ [x]] x)
+                  bound
+                  (bind with-locals
+                        return-symbol
+                        return-expression)
 
-                 :bind
-                 (fn [env [x]] (assoc env :value (list 'quote x)))})
+                  captures
+                  (outer-links bound)
 
-      (tree/put '[qt]
-                {:interpret
-                 (fn [env [content]]
-                   (interpret env (quote/quote-fn 0 content)))
+                  recursive?
+                  (occur-check bound (conj position fn-name))
 
-                 :bind
-                 (fn [env [content]]
-                   (bind env (quote/quote-fn 0 content)))})
+                  build-as-value
+                  (fn lambda-instance-build [env]
+                    (let [return (build (tree/at env return-path))]
+                      (if recursive?
+                        (list 'fn fn-name argument-symbols return)
+                        (list 'fn argument-symbols return))))]
 
-      ;; control
-      (tree/put '[if]
-                {:interpret
-                 (fn [env [test then else]]
-                   (if (interpret env test)
-                     (interpret env then)
-                     (interpret env else)))
+              #_(println form recursive? (tree/position bound))
 
-                 :bind
-                 (fn [env [test then else]]
-                   (-> (bind-bubbling-void env 0 test 1 then 2 else)
-                       (assoc :if (list 'if test then else)
+              (if recursive?
+                (assoc bound :build build-as-value)
+                (-> (assoc bound :build build-as-value)
+                    (assoc :bind
+                           (fn lambda-instance-bind [instance-env args]
+                             #_(let [instance-pos (tree/position instance-env)
+                                     instance-env' (copy-node instance-env position instance-pos)
+                                     with-args (reduce (fn [e [sym val]] (tree/upd env [sym] #(bind % val)))
+                                                       instance-env'
+                                                       (map vector argument-symbols args))]
+                                 (assoc with-args
+                                        :build (fn [e] (build (tree/at env (conj instance-pos return-symbol))))))
+                             (let [with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
+                                                         instance-env
+                                                         captures)]
+                               (bind with-captures
+                                     (list 'let (vec (interleave argv args)) return))))))))))
+
+        ;; module
+        (defprim module
+          :interpret ()
+          :bind (fn [env args]
+                  (let [env (assoc env :module true)]
+                    (if (vector? (first args))
+                      (assoc env
+                             :parametric true
+                             :bind (fn [env2 parameters]
+                                     (-> (reduce (fn [e [sym expr]] (bind e sym expr))
+                                                 env2 (map vector (first args) parameters))
+                                         (bind (cons 'module (next args))))))
+                      (apply bind env args)))))
+
+        ;; eval
+        (defprim eval
+          :interpret
+          (fn [env [expr]]
+            (interpret env expr))
+          :bind
+          (fn [env [expr]]
+            (bind env (interpret env expr))))
+
+        ;; mac
+        (defprim mac
+          :bind
+          (fn [env [argv return]]
+            (let [expand (interpret env (list 'fn argv return))]
+              (assoc env
+                     :interpret
+                     (fn [env args]
+                       (interpret env (expand env args)))
+                     :bind
+                     (fn [env args]
+                       (bind env (expand env args)))))))
+
+        ;; binder
+        (defprim binder
+          :bind
+          (fn [env [argv return]]
+            (let [f (interpret env (list 'fn argv return))]
+              (assoc env
+                     :interpret (comp evaluate f)
+                     :bind f))))
+
+        ;; quote
+        (defprim quote
+          :interpret
+          (fn [_ [x]] x)
+
+          :bind
+          (fn [env [x]] (assoc env :value (list 'quote x))))
+
+        (defprim qt
+          :interpret
+          (fn [env [content]]
+            (interpret env (quote/quote-fn 0 content)))
+
+          :bind
+          (fn [env [content]]
+            (bind env (quote/quote-fn 0 content))))
+
+        ;; control
+        (defprim if
+          :interpret
+          (fn [env [test then else]]
+            (if (interpret env test)
+              (interpret env then)
+              (interpret env else)))
+
+          :bind
+          (fn [env [test then else]]
+            (-> (bind-bubbling-void env 0 test 1 then 2 else)
+                (assoc :if (list 'if test then else)
+                       :build
+                       (fn [env]
+                         (->> (sequential-children env)
+                              (map build)
+                              (cons 'if)))))))
+
+        (defprim ?
+          :interpret
+          (fn [env arg]
+            (u/throw [:no-implementation '? :interpret]))
+          :bind
+          (fn [env args]
+            (bind env (control/emit-form args))))
+
+        ;; collections
+        (defprim vector
+          :interpret
+          (fn [env xs]
+            (mapv (partial interpret env) xs))
+
+          :bind
+          (fn [env xs]
+            (if (composite/composed? xs)
+              (bind env (composite/expand-vec xs))
+              (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
+                          (assoc env :vector true)
+                          (map-indexed vector xs))
+                  (assoc :build
+                         (fn [env]
+                           (->> (sequential-children env)
+                                (mapv build))))))))
+
+        (defprim map-entry
+          :interpret
+          (fn [env [k v]]
+            (u/map-entry (interpret env k) (interpret env v)))
+
+          :bind
+          (fn [env [k v]]
+            (bind-bubbling-void (assoc env :map-entry true)
+                                0 k 1 v)))
+
+        (defprim hash-map
+          :interpret
+          (fn [env xs]
+            (into {} (map (fn [entry] (mapv (partial interpret env) entry)) xs)))
+
+          :bind
+          (fn [env xs]
+            (let [hm (into {} xs)]
+              (if (composite/composed? hm)
+                (bind env (composite/expand-map hm))
+                (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
+                            (assoc env :hash-map true)
+                            (map-indexed vector xs))
+                    (assoc
+                     :build
+                     (fn [env]
+                       (->> (sequential-children env)
+                            (map (fn [e] (mapv build (sequential-children e))))
+                            (into {})))))))))
+
+        ;; type hint
+        (defprim the
+          :bind
+          (fn [env [t v]]
+            (refine (bind env v)
+                    ;; TODO we should allow more type that those primitives
+                    (deref (resolve (symbol "immucode.types" (str t)))))))
+
+        ;; typed functions try
+        (defprim annotate-external-fn
+          :bind
+          (fn [env [fsym operand-types return-type]]
+            (let [resolved (resolve fsym)]
+              (assert resolved "annotate only works on external functions")
+              (assoc env :bind
+                     (fn [env args]
+                       (assoc (reduce (fn [env [idx typed-arg]]
+                                        (bind-bubbling-void env idx typed-arg))
+                                      env (->> (map (fn [t x] (list 'the t x)) operand-types args)
+                                               (map-indexed vector)))
                               :build
                               (fn [env]
-                                (->> (sequential-children env)
-                                     (map build)
-                                     (cons 'if))))))})
-
-      (tree/put '[?]
-                {:interpret
-                 (fn [env arg]
-                   (u/throw [:no-implementation '? :interpret]))
-                 :bind
-                 (fn [env args]
-                   (bind env (control/emit-form args)))})
-
-      ;; collections
-      (tree/put '[vector]
-                {:interpret
-                 (fn [env xs]
-                   (mapv (partial interpret env) xs))
-
-                 :bind
-                 (fn [env xs]
-                   (if (composite/composed? xs)
-                     (bind env (composite/expand-vec xs))
-                     (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
-                                 (assoc env :vector true)
-                                 (map-indexed vector xs))
-                         (assoc :build
-                                (fn [env]
-                                  (->> (sequential-children env)
-                                       (mapv build)))))))})
-
-      (tree/put '[map-entry]
-                {:interpret
-                 (fn [env [k v]]
-                   (u/map-entry (interpret env k) (interpret env v)))
-
-                 :bind
-                 (fn [env [k v]]
-                   (bind-bubbling-void (assoc env :map-entry true)
-                                       0 k 1 v))})
-
-      (tree/put '[hash-map]
-                {:interpret
-                 (fn [env xs]
-                   (into {} (map (fn [entry] (mapv (partial interpret env) entry)) xs)))
-
-                 :bind
-                 (fn [env xs]
-                   (let [hm (into {} xs)]
-                     (if (composite/composed? hm)
-                       (bind env (composite/expand-map hm))
-                       (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
-                                   (assoc env :hash-map true)
-                                   (map-indexed vector xs))
-                           (assoc
-                            :build
-                            (fn [env]
-                              (->> (sequential-children env)
-                                   (map (fn [e] (mapv build (sequential-children e))))
-                                   (into {}))))))))})
-
-      ;; multi functions
-      #_(tree/put '[multi-fn simple]
-                  {:interpret
-                   (fn [_ _]
-                     (u/throw [:multi-fn.simple.evalutate :not-implemented]))
-
-                   :bind
-                   (fn [env [argv & cases]]
-                     (let [predicates (take-nth 2 cases)
-                           implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
-                       (reduce (fn [e [idx impl]] (bind e idx impl))
-                               (assoc env
-                                      :multi-fn true
-                                      :predicates predicates
-                                      :bind (fn [env2 args]
-                                              (let [returned-env (bind env2 (cons :implementation-placeholder args))
-                                                    subenvs (next (sequential-children returned-env))
-                                                    arg-check (fn [check arg] (or (= '_ check) (check arg)))
-                                                    match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
-                                                (loop [candidates (map-indexed vector predicates)]
-                                                  (if-let [[[idx pred] & cs] (seq candidates)]
-                                                    (if (match? pred subenvs)
-                                                      (assoc-in returned-env [::tree/node 0]
-                                                                {:link (conj (tree/position env) idx)})
-                                                      (recur cs))
-                                                    (u/throw [:multi-fn.simple :no-dispatch args]))))))
-                               (map-indexed vector implementations))))})
-
-
-      ;; type hint
-      (tree/put '[the]
-                {:bind
-                 (fn [env [t v]]
-                   (refine (bind env v)
-                           ;; TODO we should allow more type that those primitives
-                           (deref (resolve (symbol "immucode.types" (str t))))))})
-
-      ;; typed functions try
-      (tree/put '[types annotate]
-                {:bind
-                 (fn [env [fsym operand-types return-type]]
-                   (let [resolved (resolve fsym)]
-                     (assert resolved "annotate only works on external functions")
-                     (assoc env :bind
-                            (fn [env args]
-                              (assoc (reduce (fn [env [idx typed-arg]]
-                                               (bind-bubbling-void env idx typed-arg))
-                                             env (->> (map (fn [t x] (list 'the t x)) operand-types args)
-                                                      (map-indexed vector)))
-                                     :build
-                                     (fn [env]
-                                       (cons resolved (mapv build (sequential-children env)))))))))})
-
-      (tree/put '[types cond]
-                {:notes
-                 '["like a cond where tests cases can fail eliminating the whole branch at bind time"
-                   (types.cond
-                    (the number x) (+ x x)
-                    (the string x) (str x x))
-                   "if x is known to be number at bind time this expression will be substituted by"
-                   (+ x x)
-                   "if not it will need to be compiled to something like"
-                   (? (number? x) (+ x x)
-                      (string? x) (str x x))
-                   "if all tests are void the whole form is void"
-
-                   ]
-
-                 :bind (fn [env cases]
-                         (let [couples (partition 2 cases)
-                               ]))})
-
-      (tree/put '[types branch]
-                {:notes
-                 '["before cond there is this simpler form to explore"
-                   (types.branch
-                    (+ x x)
-                    (str x "pouet"))
-                   "each of the given expressions could be eliminated if void"
-                   "the first non void will be built"]
-
-                 :bind
-                 (fn types-branch-bind
-                   [env exprs]
-                   (if (seq exprs)
-                     (let [on-void-fn
-                           (fn [initial refined]
-                             (bind ))]
-                       (-> (bind env (first exprs))
-                           (update :refine
-                                   (fn [f] (fn [env t] (let [env' (f env t)]
-                                                       (if (void-node? env')
-                                                         (refine (types-branch-bind env (next exprs))
-                                                                 t)
-                                                         env')))))))
-                     ()))})))
-
-(defn bind-prog
-  [body]
-  (if (even? (count body))
-    (u/throw [::prog "no return expression." (cons `prog body)])
-    (let [[pairs return] (pairs&return body)
-          return-symbol (gensym "ret_")
-          bindings (conj (vec pairs) [return-symbol return])
-          bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
-      (cd bound return-symbol))))
-
-(defmacro prog
-  [& body]
-  (compile (bind-prog body)))
-
-(defmacro prog'
-  [& body]
-  `(bind-prog ~(mapv quote/quote-wrap body)))
-
-(comment :types.annotate
-  (compile (prog' add2 (types.annotate c/+ [number number] number)
-                 (add2 1 "23"))))
+                                (cons resolved (mapv build (sequential-children env))))))))))))
 
 
 
-#_(prog (+ (the number 1) 2))
-#_(prog incinc (fn [x] (+ (the number x) 2))
-      (incinc "2"))
 
+
+
+;; ---------------- SCRATCH_TESTS ---------------------
+
+(comment :current-tries
+
+         (prog f (fn [x] (f x))
+               12)
+
+         (prog f (fn [x] (+ x x))
+               12)
+
+         (u/throws (prog add2 (annotate-external-fn c/+ [number number] number)
+                         (add2 "2" 2)))
+
+         (prog add2 (fn [a b] (the number (c/+ (the number x) (the number y))))
+               f (fn [a b] (add2 a b))
+               (f 1 2))
+
+         (prog' add2 (fn [x y] (c/+ (the number x) (the number y)))
+                (add2 "4" 2))
+
+         (prog' g (fn [a b] (+ a b))
+                f (fn [a1 b1] (g a1 b1))
+                (f 1 2))
+
+         (prog a 2
+               (let [a 3] (let [a 4] a))
+               )
+
+         #_ (prog (+ (the number 1) 2))
+         #_ (prog incinc (fn [x] (+ (the number x) 2))
+                  (incinc "2"))
+
+         (prog x 1
+               f (fn [a b] (let [y 4] (+ x y a b)))
+               (f 4 5)))
 
 (do :tries
 
@@ -751,12 +792,13 @@
 
         (do :simple
 
-
             (transitive-deps
              (prog' x 1 y 2 (+ x y)))
 
             (compile
              (prog' x 1 y x (+ y y)))
+
+            (dbg (prog' x 1 y x (+ y y)))
 
             (prog (let [x 1 y 2] (+ y x)))
 
@@ -784,9 +826,9 @@
             (prog ((mac [_ args] (clojure.core/list (second args) (first args) (nth args 2)))
                    1 + 2))
 
-            (bind ENV0 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
+            (bind @env* 'infix '(mac [_ args] (list (second args) (first args) (nth args 2))))
 
-            (bind ENV0 'm '(binder [e _] e))
+            (bind @env* 'm '(binder [e _] e))
 
             (prog this-value 4
                   m (binder [e args]
@@ -807,7 +849,7 @@
 
         (do :recursion
 
-            (bind ENV0 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
+            (bind @env* 'f '(fn [x] (if (pos? x) (f (dec x)) :done)))
             (prog f (fn [x] (if (pos? x) (f (dec x)) :done))
                   (f 10)))
 
@@ -844,19 +886,25 @@
                   (math.add 1 2))
 
             (prog num (module [x]
+                               add (fn [y] (+ x y))
+                               sub (fn [y] (- x y)))
+                   one (num 1)
+                   (one.add 4))
+
+            (prog num (module [x]
                               add (fn [y] (+ x y))
                               sub (fn [y] (- x y)))
-                  one (num 1)
-                  (one.add 4)))
+                  n2 (num 2)
+                  n2.add))
 
         (do :unquote
-            (bind ENV0 'x '~(+ 1 2))
+            (bind @env* 'x '~(+ 1 2))
             (prog x ~(+ 1 2)
                   x))
 
         (do :control
 
-            (bind ENV0 'x '(? (pos? 1) :ok :ko))
+            (bind @env* 'x '(? (pos? 1) :ok :ko))
             (prog (? (pos? 1) :ok :ko)))
 
         (do :type-hint
@@ -866,3 +914,449 @@
 
             '(should-throw (prog (let [x 1]
                                    (the string x)))))))
+
+
+(comment :env0
+
+         (def ENV0
+
+           (-> {}
+
+               ;; base
+               (tree/put '[value]
+                         {:bind
+                          (fn [env [v]]
+                            (assoc env
+                                   :value v
+                                   :type (types/single v)
+                                   :refine (fn [env t]
+                                             (update env :type types/intersect t))))})
+
+               (tree/put '[external]
+                         {:interpret
+                          (fn [env [sym]]
+                            (if-let [resolved (resolve sym)]
+                              (deref resolved)
+                              (u/throw [:unresolvable sym :in env])))
+                          :bind
+                          (fn [env [sym]]
+                            (if-let [resolved (resolve sym)]
+                              (if (= resolved #'clojure.core/unquote)
+                                (bind env 'eval)
+                                (assoc env
+                                       :external resolved
+                                       :build (fn [_] (var->qualified-symbol resolved))))
+                              (u/throw [:unresolvable sym :in env])))})
+
+               (tree/put '[s-expr]
+                         {:interpret
+                          (fn s-expr-interpret [env expr]
+                            (if (composite/composed? expr)
+                              (interpret env (composite/expand-seq expr))
+                              (let [[verb & args]
+                                    (map (partial interpret env) expr)]
+                                (apply verb args))))
+
+                          :bind
+                          (fn s-expr-bind [env expr]
+                            (if (composite/composed? expr)
+                              (bind env (composite/expand-seq expr))
+                              (-> (reduce (fn [env [idx subexpr]]
+                                            (bind-bubbling-void env idx subexpr))
+                                          (assoc env :s-expr expr)
+                                          (map-indexed vector expr))
+                                  (assoc
+                                   :build
+                                   (fn s-expr-instance-build [env]
+                                     (map build (sequential-children env)))))))})
+
+               ;; let
+               (tree/put '[let1]
+                         {:interpret
+                          (fn let1-interpret
+                            [env [[pattern expr] return]]
+                            (-> (reduce (fn [e [argsym argval]]
+                                          (tree/put e [argsym] :value (interpret e argval)))
+                                        env (partition 2 (destructure/bindings pattern expr {})))
+                                (interpret return)))
+
+                          :bind
+                          (fn let1-bind
+                            [env [[pattern expr] return :as args]]
+
+                            (let [return-symbol '__return__
+
+                                  bindings
+                                  (partition 2 (destructure/bindings pattern expr {}))
+
+                                  bound
+                                  (reduce (fn [e [sym expr]]
+                                            (-> (bind-bubbling-void e sym expr)
+                                                (tree/put [sym] :local true)))
+                                          env bindings)]
+
+                              (-> (bind bound
+                                        return-symbol
+                                        return)
+
+                                  (assoc
+                                   :let1 (cons 'let1 args)
+                                   :build
+                                   (fn let1-instance-build [env]
+                                     (let [bindings
+                                           (map (fn [sym]
+                                                  [sym (build (cd env sym))])
+                                                (map first bindings))]
+                                       (list 'let
+                                             (reduce into [] bindings)
+                                             (build (cd env return-symbol)))))))))})
+
+               (tree/put '[let]
+                         ;; TODO add named let (using lambda)
+                         {:interpret
+                          (fn let-interpret [env [bindings return]]
+                            (interpret env
+                                       (reduce (fn [ret binding] (list 'let1 binding ret))
+                                               return (reverse (partition 2 bindings)))))
+
+                          :bind
+                          (fn let-bind [env [bindings return]]
+                            (bind env
+                                  (reduce (fn [ret binding] (list 'let1 binding ret))
+                                          return (reverse (partition 2 bindings)))))})
+
+               ;; lambda
+               (tree/put '[fn]
+                         {:interpret
+                          (fn [env [argv return]]
+                            (fn [& xs]
+                              ;; TODO add recursion
+                              (-> (reduce (fn [e [argsym argval]]
+                                            (tree/put e [argsym] :value argval))
+                                          env (zipmap argv xs))
+                                  (interpret return))))
+
+                          :bind
+                          (fn [env [argv return]]
+
+                            (let [form (list 'fn argv return)
+                                  position (tree/position env)
+                                  fn-name (last position)
+                                  return-symbol '__return__
+                                  return-path (conj position return-symbol)
+
+                                  arguments
+                                  (map-indexed (fn [idx p]
+                                                 (if (symbol? p)
+                                                   {:symbol p}
+                                                   {:symbol (gensym (str "arg" idx))
+                                                    :destructure p}))
+                                               argv)
+
+                                  argument-symbols
+                                  (mapv :symbol arguments)
+
+                                  with-locals
+                                  (reduce (fn [e a]
+                                            (bubbling-void (tree/put e [a] :local a)
+                                                           [a]))
+                                          (assoc env :lambda form)
+                                          (cons fn-name argument-symbols))
+
+                                  destructuration-bindings
+                                  (mapcat (juxt :destructure :symbol)
+                                          (filter :destructure arguments))
+
+                                  return-expression
+                                  (if (seq destructuration-bindings)
+                                    (list 'let destructuration-bindings return)
+                                    return)
+
+                                  bound
+                                  (bind with-locals
+                                        return-symbol
+                                        return-expression)
+
+                                  captures
+                                  (outer-links bound)
+
+                                  recursive?
+                                  (occur-check bound (conj position fn-name))
+
+                                  build-as-value
+                                  (fn lambda-instance-build [env]
+                                    (let [return (build (tree/at env return-path))]
+                                      (if recursive?
+                                        (list 'fn fn-name argument-symbols return)
+                                        (list 'fn argument-symbols return))))]
+
+                              (println form recursive? (tree/position bound))
+
+                              (if recursive?
+                                (assoc bound :build build-as-value)
+                                (-> (assoc bound :build build-as-value)
+                                    (assoc :bind
+                                           (fn lambda-instance-bind [instance-env args]
+                                             #_(let [instance-pos (tree/position instance-env)
+                                                     instance-env' (copy-node instance-env position instance-pos)
+                                                     with-args (reduce (fn [e [sym val]] (tree/upd env [sym] #(bind % val)))
+                                                                       instance-env'
+                                                                       (map vector argument-symbols args))]
+                                                 (assoc with-args
+                                                        :build (fn [e] (build (tree/at env (conj instance-pos return-symbol))))))
+                                             (let [with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
+                                                                         instance-env
+                                                                         captures)]
+                                               (bind with-captures
+                                                     (list 'let (vec (interleave argv args)) return)))))))))})
+
+               ;; module
+               (tree/put '[module]
+                         {:interpret ()
+                          :bind (fn [env args]
+                                  (let [env (assoc env :module true)]
+                                    (if (vector? (first args))
+                                      (assoc env
+                                             :parametric true
+                                             :bind (fn [env2 parameters]
+                                                     (-> (reduce (fn [e [sym expr]] (bind e sym expr))
+                                                                 env2 (map vector (first args) parameters))
+                                                         (bind (cons 'module (next args))))))
+                                      (apply bind env args))))})
+
+               ;; eval
+               (tree/put '[eval]
+                         {:interpret
+                          (fn [env [expr]]
+                            (interpret env expr))
+                          :bind
+                          (fn [env [expr]]
+                            (bind env (interpret env expr)))})
+
+               ;; mac
+               (tree/put '[mac]
+                         {:bind
+                          (fn [env [argv return]]
+                            (let [expand (interpret env (list 'fn argv return))]
+                              (assoc env
+                                     :interpret
+                                     (fn [env args]
+                                       (interpret env (expand env args)))
+                                     :bind
+                                     (fn [env args]
+                                       (bind env (expand env args))))))})
+
+               ;; binder
+               (tree/put '[binder]
+                         {:bind
+                          (fn [env [argv return]]
+                            (let [f (interpret env (list 'fn argv return))]
+                              (assoc env
+                                     :interpret (comp evaluate f)
+                                     :bind f)))})
+
+               ;; quote
+               (tree/put '[quote]
+                         {:interpret
+                          (fn [_ [x]] x)
+
+                          :bind
+                          (fn [env [x]] (assoc env :value (list 'quote x)))})
+
+               (tree/put '[qt]
+                         {:interpret
+                          (fn [env [content]]
+                            (interpret env (quote/quote-fn 0 content)))
+
+                          :bind
+                          (fn [env [content]]
+                            (bind env (quote/quote-fn 0 content)))})
+
+               ;; control
+               (tree/put '[if]
+                         {:interpret
+                          (fn [env [test then else]]
+                            (if (interpret env test)
+                              (interpret env then)
+                              (interpret env else)))
+
+                          :bind
+                          (fn [env [test then else]]
+                            (-> (bind-bubbling-void env 0 test 1 then 2 else)
+                                (assoc :if (list 'if test then else)
+                                       :build
+                                       (fn [env]
+                                         (->> (sequential-children env)
+                                              (map build)
+                                              (cons 'if))))))})
+
+               (tree/put '[?]
+                         {:interpret
+                          (fn [env arg]
+                            (u/throw [:no-implementation '? :interpret]))
+                          :bind
+                          (fn [env args]
+                            (bind env (control/emit-form args)))})
+
+               ;; collections
+               (tree/put '[vector]
+                         {:interpret
+                          (fn [env xs]
+                            (mapv (partial interpret env) xs))
+
+                          :bind
+                          (fn [env xs]
+                            (if (composite/composed? xs)
+                              (bind env (composite/expand-vec xs))
+                              (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
+                                          (assoc env :vector true)
+                                          (map-indexed vector xs))
+                                  (assoc :build
+                                         (fn [env]
+                                           (->> (sequential-children env)
+                                                (mapv build)))))))})
+
+               (tree/put '[map-entry]
+                         {:interpret
+                          (fn [env [k v]]
+                            (u/map-entry (interpret env k) (interpret env v)))
+
+                          :bind
+                          (fn [env [k v]]
+                            (bind-bubbling-void (assoc env :map-entry true)
+                                                0 k 1 v))})
+
+               (tree/put '[hash-map]
+                         {:interpret
+                          (fn [env xs]
+                            (into {} (map (fn [entry] (mapv (partial interpret env) entry)) xs)))
+
+                          :bind
+                          (fn [env xs]
+                            (let [hm (into {} xs)]
+                              (if (composite/composed? hm)
+                                (bind env (composite/expand-map hm))
+                                (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
+                                            (assoc env :hash-map true)
+                                            (map-indexed vector xs))
+                                    (assoc
+                                     :build
+                                     (fn [env]
+                                       (->> (sequential-children env)
+                                            (map (fn [e] (mapv build (sequential-children e))))
+                                            (into {}))))))))})
+
+               ;; multi functions
+               #_(tree/put '[multi-fn simple]
+                           {:interpret
+                            (fn [_ _]
+                              (u/throw [:multi-fn.simple.evalutate :not-implemented]))
+
+                            :bind
+                            (fn [env [argv & cases]]
+                              (let [predicates (take-nth 2 cases)
+                                    implementations (map (partial list 'fn argv) (take-nth 2 (next cases)))]
+                                (reduce (fn [e [idx impl]] (bind e idx impl))
+                                        (assoc env
+                                               :multi-fn true
+                                               :predicates predicates
+                                               :bind (fn [env2 args]
+                                                       (let [returned-env (bind env2 (cons :implementation-placeholder args))
+                                                             subenvs (next (sequential-children returned-env))
+                                                             arg-check (fn [check arg] (or (= '_ check) (check arg)))
+                                                             match? (fn [preds subenvs] (every? identity (map arg-check preds subenvs)))]
+                                                         (loop [candidates (map-indexed vector predicates)]
+                                                           (if-let [[[idx pred] & cs] (seq candidates)]
+                                                             (if (match? pred subenvs)
+                                                               (assoc-in returned-env [::tree/node 0]
+                                                                         {:link (conj (tree/position env) idx)})
+                                                               (recur cs))
+                                                             (u/throw [:multi-fn.simple :no-dispatch args]))))))
+                                        (map-indexed vector implementations))))})
+
+
+               ;; type hint
+               (tree/put '[the]
+                         {:bind
+                          (fn [env [t v]]
+                            (refine (bind env v)
+                                    ;; TODO we should allow more type that those primitives
+                                    (deref (resolve (symbol "immucode.types" (str t))))))})
+
+               ;; typed functions try
+               (tree/put '[types annotate]
+                         {:bind
+                          (fn [env [fsym operand-types return-type]]
+                            (let [resolved (resolve fsym)]
+                              (assert resolved "annotate only works on external functions")
+                              (assoc env :bind
+                                     (fn [env args]
+                                       (assoc (reduce (fn [env [idx typed-arg]]
+                                                        (bind-bubbling-void env idx typed-arg))
+                                                      env (->> (map (fn [t x] (list 'the t x)) operand-types args)
+                                                               (map-indexed vector)))
+                                              :build
+                                              (fn [env]
+                                                (cons resolved (mapv build (sequential-children env)))))))))})
+
+               (tree/put '[types cond]
+                         {:notes
+                          '["like a cond where tests cases can fail eliminating the whole branch at bind time"
+                            (types.cond
+                             (the number x) (+ x x)
+                             (the string x) (str x x))
+                            "if x is known to be number at bind time this expression will be substituted by"
+                            (+ x x)
+                            "if not it will need to be compiled to something like"
+                            (? (number? x) (+ x x)
+                                           (string? x) (str x x))
+                            "if all tests are void the whole form is void"
+
+                            ]
+
+                          :bind (fn [env cases]
+                                  (let [couples (partition 2 cases)
+                                        ]))})
+
+               (tree/put '[types branch]
+                         {:notes
+                          '["before cond there is this simpler form to explore"
+                            (types.branch
+                             (+ x x)
+                             (str x "pouet"))
+                            "each of the given expressions could be eliminated if void"
+                            "the first non void will be built"]
+
+                          :bind
+                          (fn types-branch-bind
+                            [env exprs]
+                            (if (seq exprs)
+                              (let [on-void-fn
+                                    (fn [initial refined]
+                                      (bind ))]
+                                (-> (bind env (first exprs))
+                                    (update :refine
+                                            (fn [f] (fn [env t] (let [env' (f env t)]
+                                                                (if (void-node? env')
+                                                                  (refine (types-branch-bind env (next exprs))
+                                                                          t)
+                                                                  env')))))))
+                              ()))})))
+
+         (defn bind-prog
+           [body]
+           (if (even? (count body))
+             (u/throw [::prog "no return expression." (cons `prog body)])
+             (let [[pairs return] (pairs&return body)
+                   return-symbol (gensym "ret_")
+                   bindings (conj (vec pairs) [return-symbol return])
+                   bound (reduce (fn [e [s v]] (bind e s v)) ENV0 bindings)]
+               (cd bound return-symbol))))
+
+         (defmacro prog
+           [& body]
+           (compile (bind-prog body)))
+
+         (defmacro prog'
+           [& body]
+           `(bind-prog ~(mapv quote/quote-wrap body))))

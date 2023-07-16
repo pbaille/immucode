@@ -90,6 +90,17 @@
 
     (defn ppr [tree] (u/ppr (show tree))))
 
+(do :walk
+
+    (defn bf-walk [tree f]
+      (let [tree' (f tree)]
+        (if (::node tree')
+          (update tree'
+                  ::node (fn [node]
+                           (->> node
+                                (map (fn [[k child]] [k (bf-walk child f)]))
+                                (into {}))))
+          tree'))))
 
 (comment :tries
 

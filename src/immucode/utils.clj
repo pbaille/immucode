@@ -70,6 +70,13 @@
 (defn throw [& xs]
   (throw (Exception. (apply pretty-str xs))))
 
+(defmacro throws [form]
+  `(assert (try
+             (and ~form nil)
+             (catch Exception ~'_
+               true))
+           (str "should throw: " '~form)))
+
 (defmacro is [& xs]
   `(or (= ~@xs)
        (throw (into [:not-equal] '~xs))))

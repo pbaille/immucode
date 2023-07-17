@@ -299,7 +299,10 @@
           ([env at x & xs]
            (reduce (fn [env [at x]] (bind-bubbling-void env at x))
                    (bind-bubbling-void env at x)
-                   (partition 2 xs))))))
+                   (partition 2 xs))))
+
+        (defn bubbling-void [e _] e)
+        (defn bind-bubbling-void [e & xs] (apply bind e xs))))
 
 (do :env*
 
@@ -400,32 +403,34 @@
           (fn let1-bind
             [env [[pattern expr] return :as args]]
 
-            (let [return-symbol '__return__
+            (if (= pattern expr)
+              (bind env return)
+              (let [return-symbol '__return__
 
-                  bindings
-                  (partition 2 (destructure/bindings pattern expr {}))
+                    bindings
+                    (partition 2 (destructure/bindings pattern expr {}))
 
-                  bound
-                  (reduce (fn [e [sym expr]]
-                            (-> (bind-bubbling-void e sym expr)
-                                (tree/put [sym] :local true)))
-                          env bindings)]
+                    bound
+                    (reduce (fn [e [sym expr]]
+                              (-> (bind-bubbling-void e sym expr)
+                                  (tree/put [sym] :local true)))
+                            env bindings)]
 
-              (-> (bind bound
-                        return-symbol
-                        return)
+                (-> (bind bound
+                          return-symbol
+                          return)
 
-                  (assoc
-                   :let1 (cons 'let1 args)
-                   :build
-                   (fn let1-instance-build [env]
-                     (let [bindings
-                           (map (fn [sym]
-                                  [sym (build (cd env sym))])
-                                (map first bindings))]
-                       (list 'let
-                             (reduce into [] bindings)
-                             (build (cd env return-symbol))))))))))
+                    (assoc
+                     :let1 (list 'let1 [pattern expr] return)
+                     :build
+                     (fn let1-instance-build [env]
+                       (let [bindings
+                             (map (fn [sym]
+                                    [sym (build (cd env sym))])
+                                  (map first bindings))]
+                         (list 'let
+                               (reduce into [] bindings)
+                               (build (cd env return-symbol)))))))))))
 
         (defprim let
           ;; TODO add named let (using lambda)
@@ -438,7 +443,7 @@
           :bind
           (fn let-bind [env [bindings return]]
             (bind env
-                  (reduce (fn [ret binding] (list 'let1 binding ret))
+                  (reduce (fn [ret binding] (list 'let1 (vec binding) ret))
                           return (reverse (partition 2 bindings))))))
 
         ;; lambda
@@ -506,27 +511,23 @@
                         (list 'fn fn-name argument-symbols return)
                         (list 'fn argument-symbols return))))]
 
-              #_(println form recursive? (tree/position bound))
-
               (if recursive?
                 (assoc bound :build build-as-value)
                 (-> (assoc bound :build build-as-value)
                     (assoc :bind
-                           (fn lambda-instance-bind [instance-env args]
-                             #_(let [instance-pos (tree/position instance-env)
-                                     instance-env' (copy-node instance-env position instance-pos)
-                                     with-args (reduce (fn [e [sym val]] (tree/upd env [sym] #(bind % val)))
-                                                       instance-env'
-                                                       (map vector argument-symbols args))]
-                                 (assoc with-args
-                                        :build (fn [e] (build (tree/at env (conj instance-pos return-symbol))))))
-                             (let [with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
-                                                         instance-env
+                           (fn lambda-instance-bind [env args]
+                             (let [return-sym '__return__
+                                   return-path (conj (tree/position env) return-sym)
+                                   with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
+                                                         env
                                                          captures)]
-                               (bind with-captures
-                                     (list 'let (vec (interleave argv args)) return))))))))))
+                               (-> (bind with-captures
+                                         return-sym
+                                         (list 'let (vec (interleave argv args)) return))
+                                   (assoc :build
+                                          (fn [env]
+                                            (build (tree/at env return-path)))))))))))))
 
-        ;; module
         (defprim module
           :interpret ()
           :bind (fn [env args]
@@ -540,7 +541,6 @@
                                          (bind (cons 'module (next args))))))
                       (apply bind env args)))))
 
-        ;; eval
         (defprim eval
           :interpret
           (fn [env [expr]]
@@ -549,7 +549,6 @@
           (fn [env [expr]]
             (bind env (interpret env expr))))
 
-        ;; mac
         (defprim mac
           :bind
           (fn [env [argv return]]
@@ -562,7 +561,6 @@
                      (fn [env args]
                        (bind env (expand env args)))))))
 
-        ;; binder
         (defprim binder
           :bind
           (fn [env [argv return]]
@@ -571,7 +569,6 @@
                      :interpret (comp evaluate f)
                      :bind f))))
 
-        ;; quote
         (defprim quote
           :interpret
           (fn [_ [x]] x)
@@ -588,7 +585,6 @@
           (fn [env [content]]
             (bind env (quote/quote-fn 0 content))))
 
-        ;; control
         (defprim if
           :interpret
           (fn [env [test then else]]
@@ -662,7 +658,6 @@
                             (map (fn [e] (mapv build (sequential-children e))))
                             (into {})))))))))
 
-        ;; type hint
         (defprim the
           :bind
           (fn [env [t v]]
@@ -670,7 +665,6 @@
                     ;; TODO we should allow more type that those primitives
                     (deref (resolve (symbol "immucode.types" (str t)))))))
 
-        ;; typed functions try
         (defprim annotate-external-fn
           :bind
           (fn [env [fsym operand-types return-type]]
@@ -708,12 +702,21 @@
                f (fn [a b] (add2 a b))
                (f 1 2))
 
-         (prog' add2 (fn [x y] (c/+ (the number x) (the number y)))
-                (add2 "4" 2))
+         (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+            (add2 4 2))
+
+         (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+               (add2 "2" 2))
+
+         (prog g (fn [a b] (+ a b))
+               f (fn [a b] (g a b))
+               (f 1 2))
 
          (prog' g (fn [a b] (+ a b))
-                f (fn [a1 b1] (g a1 b1))
-                (f 1 2))
+                f (fn [a b] (g a b))
+                #_(f 1 2)
+                1)
+
 
          (prog a 2
                (let [a 3] (let [a 4] a))

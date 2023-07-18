@@ -105,7 +105,29 @@
         (defn recursive-node? [env]
           (let [pos (tree/position env)]
             (some (fn [c] (occur-check c pos))
-                  (tree/children env))))))
+                  (tree/children env))))
+
+        (defn outer-links
+          "return all links pointing outside the current node"
+          [env]
+          (if-let [target (:link env)]
+            (list target)
+            (->> (map outer-links (tree/children env))
+                 (reduce deps-merge ())
+                 (remove (partial path/parent-of (tree/position env))))))
+
+        (defn transitive-deps
+          [env]
+          (loop [ret () todo (outer-links env)]
+            (if (seq todo)
+              (let [next-ret (deps-merge ret todo)]
+                (recur next-ret
+                       (->> todo
+                            (map (partial tree/at env))
+                            (map outer-links)
+                            (reduce deps-merge ())
+                            (remove (set next-ret)))))
+              ret)))))
 
 (defn bind
 
@@ -192,33 +214,11 @@
                (path/path at) "from:"
                (tree/position env)]))))
 
-(defn outer-links
-  "return all links pointing outside the current node"
-  [env]
-  (if-let [target (:link env)]
-    (list target)
-    (->> (map outer-links (tree/children env))
-         (reduce deps-merge ())
-         (remove (partial path/parent-of (tree/position env))))))
-
-(defn transitive-deps
-  [env]
-  (loop [ret () todo (outer-links env)]
-    (if (seq todo)
-      (let [next-ret (deps-merge ret todo)]
-        (recur next-ret
-               (->> todo
-                    (map (partial tree/at env))
-                    (map outer-links)
-                    (reduce deps-merge ())
-                    (remove (set next-ret)))))
-      ret)))
-
 (defn build
   [env]
   (cond
     (void-node? env) (u/throw [::build :void-node (tree/show env)])
-     ; handling falsy values
+                                        ; handling falsy values
     (contains? env :value) (get env :value)
     :else
     (if-let [build (:build env)]
@@ -248,61 +248,32 @@
     (defn default-refine-method [env t]
       (update env :type (fnil types/intersect types/any) t))
 
+    (defn propagate-refinement [env]
+      (if-let [propagation-links (seq (:referenced-by env))]
+        (-> (reduce (fn [env p]
+                      (if-let [{:as parent :keys [on-refined-child]} (tree/parent (tree/at env p))]
+                        (if on-refined-child
+                          (on-refined-child parent (last p))
+                          env)
+                        env))
+                    env propagation-links)
+            (tree/at (tree/position env)))
+        env))
+
     (defn refine
       ([env t]
        (let [pos (tree/position env)
              target (target-node env)]
-         (let [f (get target :refine default-refine-method)]
-           (-> (f target t)
+         (let [f (get target :refine default-refine-method)
+               refined (f target t)]
+           (-> (if (= (:type target) (:type refined))
+                 (propagate-refinement refined)
+                 refined)
                (tree/at pos)))))
       ([env at t]
        (tree/upd env
                  (path/path at)
-                 #(refine % t))))
-
-    (do :void-handling
-
-        (defn on-void
-          "install a function to call when the target node is refined to void
-   this function will accept two arguments
-   - the env prior to the refinement yeilding to void
-   - the env refined to void"
-          ([env f]
-           (let [pos (tree/position env)
-                 target (target-node env)]
-             (-> (update target :refine
-                         (fn [r] (fn [env t]
-                                  (println "refined " t)
-                                  (let [refine (or r default-refine-method)
-                                        refined (refine env t)]
-                                    (if (= types/void (:type refined))
-                                      (f env refined)
-                                      refined)))))
-                 (tree/at pos))))
-          ([env at f]
-           (tree/upd env
-                     (path/path at)
-                     #(on-void % f))))
-
-        (defn bubbling-void
-          "when an inner node is refined to void, it makes its parent void."
-          [env at]
-          (on-void env at (fn [_ refined]
-                            (tree/at (refine (tree/parent refined) types/void)
-                                     (path/path at)))))
-
-        (defn bind-bubbling-void
-          "simple combination of bind -> bubling-void"
-          ([env at x]
-           (-> (bind env at x)
-               (bubbling-void at)))
-          ([env at x & xs]
-           (reduce (fn [env [at x]] (bind-bubbling-void env at x))
-                   (bind-bubbling-void env at x)
-                   (partition 2 xs))))
-
-        (defn bubbling-void [e _] e)
-        (defn bind-bubbling-void [e & xs] (apply bind e xs))))
+                 #(refine % t)))))
 
 (do :env*
 
@@ -322,10 +293,6 @@
               bound (reduce (fn [e [s v]] (bind e s v)) @env* bindings)]
           (cd bound return-symbol))))
 
-    (defmacro prog
-      [& body]
-      (compile (bind-prog body)))
-
     (defn dbg [env]
       [:at (tree/position env)
        :env (-> (tree/root env)
@@ -334,10 +301,6 @@
                                            (remove (comp ::primitive val))
                                            (into {}))))
                 (tree/bf-walk (fn [node] (dissoc node :bind :build :interpret :refine :referenced-by))))])
-
-    (defmacro prog'
-      [& body]
-      `(dbg (bind-prog ~(mapv quote/quote-wrap body))))
 
     (do :extension
 
@@ -381,7 +344,7 @@
             (if (composite/composed? expr)
               (bind env (composite/expand-seq expr))
               (-> (reduce (fn [env [idx subexpr]]
-                            (bind-bubbling-void env idx subexpr))
+                            (bind env idx subexpr))
                           (assoc env :s-expr expr)
                           (map-indexed vector expr))
                   (assoc
@@ -412,7 +375,7 @@
 
                     bound
                     (reduce (fn [e [sym expr]]
-                              (-> (bind-bubbling-void e sym expr)
+                              (-> (bind e sym expr)
                                   (tree/put [sym] :local true)))
                             env bindings)]
 
@@ -446,7 +409,7 @@
                   (reduce (fn [ret binding] (list 'let1 (vec binding) ret))
                           return (reverse (partition 2 bindings))))))
 
-        ;; lambda
+        ;; bread and butter
         (defprim fn
           :interpret
           (fn [env [argv return]]
@@ -479,8 +442,7 @@
 
                   with-locals
                   (reduce (fn [e a]
-                            (bubbling-void (tree/put e [a] :local a)
-                                           [a]))
+                            (tree/put e [a] :local a))
                           (assoc env :lambda form)
                           (cons fn-name argument-symbols))
 
@@ -528,6 +490,26 @@
                                           (fn [env]
                                             (build (tree/at env return-path)))))))))))))
 
+        (defprim binder
+          :bind
+          (fn [env [argv return]]
+            (let [f (interpret env (list 'fn argv return))]
+              (assoc env
+                     :interpret (comp evaluate f)
+                     :bind f))))
+
+        (defprim mac
+          :bind
+          (fn [env [argv return]]
+            (let [expand (interpret env (list 'fn argv return))]
+              (assoc env
+                     :interpret
+                     (fn [env args]
+                       (interpret env (expand env args)))
+                     :bind
+                     (fn [env args]
+                       (bind env (expand env args)))))))
+
         (defprim module
           :interpret ()
           :bind (fn [env args]
@@ -549,26 +531,7 @@
           (fn [env [expr]]
             (bind env (interpret env expr))))
 
-        (defprim mac
-          :bind
-          (fn [env [argv return]]
-            (let [expand (interpret env (list 'fn argv return))]
-              (assoc env
-                     :interpret
-                     (fn [env args]
-                       (interpret env (expand env args)))
-                     :bind
-                     (fn [env args]
-                       (bind env (expand env args)))))))
-
-        (defprim binder
-          :bind
-          (fn [env [argv return]]
-            (let [f (interpret env (list 'fn argv return))]
-              (assoc env
-                     :interpret (comp evaluate f)
-                     :bind f))))
-
+        ;; quote
         (defprim quote
           :interpret
           (fn [_ [x]] x)
@@ -585,6 +548,7 @@
           (fn [env [content]]
             (bind env (quote/quote-fn 0 content))))
 
+        ;; control
         (defprim if
           :interpret
           (fn [env [test then else]]
@@ -594,7 +558,7 @@
 
           :bind
           (fn [env [test then else]]
-            (-> (bind-bubbling-void env 0 test 1 then 2 else)
+            (-> (bind env 0 test 1 then 2 else)
                 (assoc :if (list 'if test then else)
                        :build
                        (fn [env]
@@ -620,7 +584,7 @@
           (fn [env xs]
             (if (composite/composed? xs)
               (bind env (composite/expand-vec xs))
-              (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
+              (-> (reduce (fn [e [i v]] (bind e [i] v))
                           (assoc env :vector true)
                           (map-indexed vector xs))
                   (assoc :build
@@ -635,8 +599,8 @@
 
           :bind
           (fn [env [k v]]
-            (bind-bubbling-void (assoc env :map-entry true)
-                                0 k 1 v)))
+            (bind (assoc env :map-entry true)
+                  0 k 1 v)))
 
         (defprim hash-map
           :interpret
@@ -648,7 +612,7 @@
             (let [hm (into {} xs)]
               (if (composite/composed? hm)
                 (bind env (composite/expand-map hm))
-                (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
+                (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
                             (assoc env :hash-map true)
                             (map-indexed vector xs))
                     (assoc
@@ -658,6 +622,7 @@
                             (map (fn [e] (mapv build (sequential-children e))))
                             (into {})))))))))
 
+        ;; types
         (defprim the
           :bind
           (fn [env [t v]]
@@ -673,14 +638,20 @@
               (assoc env :bind
                      (fn [env args]
                        (assoc (reduce (fn [env [idx typed-arg]]
-                                        (bind-bubbling-void env idx typed-arg))
+                                        (bind env idx typed-arg))
                                       env (->> (map (fn [t x] (list 'the t x)) operand-types args)
                                                (map-indexed vector)))
                               :build
                               (fn [env]
                                 (cons resolved (mapv build (sequential-children env))))))))))))
 
+(defmacro prog
+      [& body]
+      (compile (bind-prog body)))
 
+(defmacro prog'
+  [& body]
+  `(dbg (bind-prog ~(mapv quote/quote-wrap body))))
 
 
 
@@ -698,98 +669,29 @@
          (u/throws (prog add2 (annotate-external-fn c/+ [number number] number)
                          (add2 "2" 2)))
 
-         (prog add2 (fn [a b] (the number (c/+ (the number x) (the number y))))
+         (prog add2 (fn [a b] (c/+ (the number a) (the number b)))
                f (fn [a b] (add2 a b))
                (f 1 2))
 
          (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
-            (add2 4 2))
+               (the string (add2 4 2)))
 
-         (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
-               (add2 "2" 2))
+         (u/throws (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+                         (add2 "2" 2)))
 
          (prog g (fn [a b] (+ a b))
                f (fn [a b] (g a b))
                (f 1 2))
 
-         (prog' g (fn [a b] (+ a b))
-                f (fn [a b] (g a b))
-                #_(f 1 2)
-                1)
-
-
          (prog a 2
                (let [a 3] (let [a 4] a))
                )
-
-         #_ (prog (+ (the number 1) 2))
-         #_ (prog incinc (fn [x] (+ (the number x) 2))
-                  (incinc "2"))
 
          (prog x 1
                f (fn [a b] (let [y 4] (+ x y a b)))
                (f 4 5)))
 
 (do :tries
-
-    (comment
-      (do :bind
-
-          (build (bind ENV0 'x 1 'y 2 '(+ x y))
-                 DEFAULT_COMPILER_OPTS)
-
-          (bind ENV0 'f '(fn [a] a))
-
-          (bind ENV0 'ret '(let [a 1] a))
-
-          (-> ENV0
-              (bind 'ret '(let [a 1 b 2] (+ a b)))
-              (cd 'ret))
-
-          (-> ENV0
-              (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
-              (bind 'ret '(f 1))
-              (cd 'ret))
-
-          (def E1
-            (-> ENV0
-                (bind 'x 1)
-                (bind 'x-link 'x)
-                (bind 'y 2)
-                (bind 'a 34)
-                (bind 'z '(+ x y))
-                (bind 'ret '(+ z z))
-                (bind 'fun '(fn [a b c] (+ a b c z)))
-                (bind 'ret2 '(fun x ret a))))
-
-          (bind ENV0 'f '(fn [x y] (let [z 5] (- z x y)))))
-
-      (do :interpret
-          E1
-          (cd E1 '[z 1])
-          (interpret E1 'x)
-          (interpret E1 'x-link)
-          (interpret E1 'z)
-          (interpret E1 'ret)
-          ((interpret ENV0 '(fn [a] a))
-           1)
-          (interpret ENV0
-                     '((mac [_ args] (list (second args) (first args) (nth args 2)))
-                       1 + 2)))
-
-      (do :build
-          (build (cd E1 'ret)
-                 DEFAULT_COMPILER_OPTS)
-
-          (eval (build (cd E1 'ret2)
-                       DEFAULT_COMPILER_OPTS))
-
-          (-> ENV0
-              (bind 'y 23)
-              (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
-              (bind 'ret '(f 1))
-              (cd 'ret)
-              (build DEFAULT_COMPILER_OPTS))))
 
     (do :progn
 
@@ -801,7 +703,7 @@
             (compile
              (prog' x 1 y x (+ y y)))
 
-            (dbg (prog' x 1 y x (+ y y)))
+            (prog' x 1 y x (+ y y))
 
             (prog (let [x 1 y 2] (+ y x)))
 
@@ -915,8 +817,67 @@
             (prog (let [x 1]
                     (the number x)))
 
-            '(should-throw (prog (let [x 1]
-                                   (the string x)))))))
+            (u/throws (prog (let [x 1]
+                                   (the string x))))))
+
+    (comment
+      (do :bind
+
+          (build (bind ENV0 'x 1 'y 2 '(+ x y))
+                 DEFAULT_COMPILER_OPTS)
+
+          (bind ENV0 'f '(fn [a] a))
+
+          (bind ENV0 'ret '(let [a 1] a))
+
+          (-> ENV0
+              (bind 'ret '(let [a 1 b 2] (+ a b)))
+              (cd 'ret))
+
+          (-> ENV0
+              (bind 'f '(fn [x] (let [a 1 b 2] (+ x a b))))
+              (bind 'ret '(f 1))
+              (cd 'ret))
+
+          (def E1
+            (-> ENV0
+                (bind 'x 1)
+                (bind 'x-link 'x)
+                (bind 'y 2)
+                (bind 'a 34)
+                (bind 'z '(+ x y))
+                (bind 'ret '(+ z z))
+                (bind 'fun '(fn [a b c] (+ a b c z)))
+                (bind 'ret2 '(fun x ret a))))
+
+          (bind ENV0 'f '(fn [x y] (let [z 5] (- z x y)))))
+
+      (do :interpret
+          E1
+          (cd E1 '[z 1])
+          (interpret E1 'x)
+          (interpret E1 'x-link)
+          (interpret E1 'z)
+          (interpret E1 'ret)
+          ((interpret ENV0 '(fn [a] a))
+           1)
+          (interpret ENV0
+                     '((mac [_ args] (list (second args) (first args) (nth args 2)))
+                       1 + 2)))
+
+      (do :build
+          (build (cd E1 'ret)
+                 DEFAULT_COMPILER_OPTS)
+
+          (eval (build (cd E1 'ret2)
+                       DEFAULT_COMPILER_OPTS))
+
+          (-> ENV0
+              (bind 'y 23)
+              (bind 'f '(fn [x] (let [a 1 b 2] (+ y x a b))))
+              (bind 'ret '(f 1))
+              (cd 'ret)
+              (build DEFAULT_COMPILER_OPTS)))))
 
 
 (comment :env0
@@ -965,7 +926,7 @@
                             (if (composite/composed? expr)
                               (bind env (composite/expand-seq expr))
                               (-> (reduce (fn [env [idx subexpr]]
-                                            (bind-bubbling-void env idx subexpr))
+                                            (bind env idx subexpr))
                                           (assoc env :s-expr expr)
                                           (map-indexed vector expr))
                                   (assoc
@@ -994,7 +955,7 @@
 
                                   bound
                                   (reduce (fn [e [sym expr]]
-                                            (-> (bind-bubbling-void e sym expr)
+                                            (-> (bind e sym expr)
                                                 (tree/put [sym] :local true)))
                                           env bindings)]
 
@@ -1061,8 +1022,7 @@
 
                                   with-locals
                                   (reduce (fn [e a]
-                                            (bubbling-void (tree/put e [a] :local a)
-                                                           [a]))
+                                            (tree/put e [a] :local a))
                                           (assoc env :lambda form)
                                           (cons fn-name argument-symbols))
 
@@ -1185,7 +1145,7 @@
 
                           :bind
                           (fn [env [test then else]]
-                            (-> (bind-bubbling-void env 0 test 1 then 2 else)
+                            (-> (bind env 0 test 1 then 2 else)
                                 (assoc :if (list 'if test then else)
                                        :build
                                        (fn [env]
@@ -1211,7 +1171,7 @@
                           (fn [env xs]
                             (if (composite/composed? xs)
                               (bind env (composite/expand-vec xs))
-                              (-> (reduce (fn [e [i v]] (bind-bubbling-void e [i] v))
+                              (-> (reduce (fn [e [i v]] (bind e [i] v))
                                           (assoc env :vector true)
                                           (map-indexed vector xs))
                                   (assoc :build
@@ -1226,7 +1186,7 @@
 
                           :bind
                           (fn [env [k v]]
-                            (bind-bubbling-void (assoc env :map-entry true)
+                            (bind (assoc env :map-entry true)
                                                 0 k 1 v))})
 
                (tree/put '[hash-map]
@@ -1239,7 +1199,7 @@
                             (let [hm (into {} xs)]
                               (if (composite/composed? hm)
                                 (bind env (composite/expand-map hm))
-                                (-> (reduce (fn [e [i [k v]]] (bind-bubbling-void e i (list 'map-entry k v)))
+                                (-> (reduce (fn [e [i [k v]]] (bind e i (list 'map-entry k v)))
                                             (assoc env :hash-map true)
                                             (map-indexed vector xs))
                                     (assoc
@@ -1295,7 +1255,7 @@
                               (assoc env :bind
                                      (fn [env args]
                                        (assoc (reduce (fn [env [idx typed-arg]]
-                                                        (bind-bubbling-void env idx typed-arg))
+                                                        (bind env idx typed-arg))
                                                       env (->> (map (fn [t x] (list 'the t x)) operand-types args)
                                                                (map-indexed vector)))
                                               :build

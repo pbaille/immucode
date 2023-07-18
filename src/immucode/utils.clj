@@ -72,7 +72,7 @@
 
 (defmacro throws [form]
   `(assert (try
-             (and ~form nil)
+             (and (eval '~form) nil)
              (catch Exception ~'_
                true))
            (str "should throw: " '~form)))

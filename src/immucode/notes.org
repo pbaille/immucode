@@ -211,5 +211,11 @@ for this, function instances should expose a bind method
 see [[file:core.clj::(tree/put '\[types annotate\]][types.annotate]]
 
 *** TODO refinement bubbling
-parent should maybe install listeners on their childs for when they are refined.
-the bubbling-void stuff should go away now.
+Parent should maybe install listeners on their childs for when they are refined.
+The bubbling-void stuff should go away now.
+** <2023-07-17 Mon>
+*** some types of primitive nodes could hold a link to their return node
+Nodes like let or lambda relies on their build method + a return child node to be compiled
+This kind of 'scope' node should hold a :link to their return node and maybe defer (some) methods to it?
+The issue with the current way of handling this kind of node is that it do not work well with void bubbling.
+This kind of forward linkage could also result in stack overflows...

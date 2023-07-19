@@ -127,7 +127,13 @@
                             (map outer-links)
                             (reduce deps-merge ())
                             (remove (set next-ret)))))
-              ret)))))
+              ret)))
+
+        (defn void-node-error-data [env]
+          (into [::build :void-node [:at (tree/position env)]]
+                (concat (when-let [void-child (:void-child env)]
+                          [[:void-child void-child]])
+                        [:in (tree/show env)])))))
 
 (defn bind
 
@@ -217,8 +223,8 @@
 (defn build
   [env]
   (cond
-    (void-node? env) (u/throw [::build :void-node (tree/show env)])
-                                        ; handling falsy values
+    (void-node? env) (u/throw (void-node-error-data env))
+    ;; handling falsy values
     (contains? env :value) (get env :value)
     :else
     (if-let [build (:build env)]
@@ -245,20 +251,24 @@
 
 (do :refine
 
-    (defn default-refine-method [env t]
-      (update env :type (fnil types/intersect types/any) t))
+    (do :default-method-impls
+
+        (defn default-refine-method [env t]
+          (update env :type (fnil types/intersect types/any) t))
+
+        (defn default-on-refined-child-method [env child-key]
+          (if (void-node? (tree/cd env [child-key]))
+            (refine (assoc env :void-child child-key) types/void)
+            env)))
 
     (defn propagate-refinement [env]
-      (if-let [propagation-links (seq (:referenced-by env))]
-        (-> (reduce (fn [env p]
-                      (if-let [{:as parent :keys [on-refined-child]} (tree/parent (tree/at env p))]
-                        (if on-refined-child
-                          (on-refined-child parent (last p))
-                          env)
-                        env))
-                    env propagation-links)
-            (tree/at (tree/position env)))
-        env))
+      (-> (reduce (fn [env p]
+                    (if-let [parent (tree/parent (tree/at env p))]
+                      (let [f (:on-refined-child parent default-on-refined-child-method)]
+                        (f parent (last p)))
+                      env))
+                  env (cons (tree/position env) (:referenced-by env)))
+          (tree/at (tree/position env))))
 
     (defn refine
       ([env t]
@@ -267,8 +277,8 @@
          (let [f (get target :refine default-refine-method)
                refined (f target t)]
            (-> (if (= (:type target) (:type refined))
-                 (propagate-refinement refined)
-                 refined)
+                 refined
+                 (propagate-refinement refined))
                (tree/at pos)))))
       ([env at t]
        (tree/upd env
@@ -343,14 +353,14 @@
           (fn s-expr-bind [env expr]
             (if (composite/composed? expr)
               (bind env (composite/expand-seq expr))
-              (-> (reduce (fn [env [idx subexpr]]
-                            (bind env idx subexpr))
-                          (assoc env :s-expr expr)
-                          (map-indexed vector expr))
-                  (assoc
-                   :build
-                   (fn s-expr-instance-build [env]
-                     (map build (sequential-children env))))))))
+              (let [env (assoc env
+                               :s-expr expr
+                               :build
+                               (fn s-expr-instance-build [env]
+                                 (map build (sequential-children env))))]
+                (reduce (fn [env [idx subexpr]]
+                          (bind env idx subexpr))
+                        env (map-indexed vector expr))))))
 
         ;; let
         (defprim let1
@@ -373,27 +383,27 @@
                     bindings
                     (partition 2 (destructure/bindings pattern expr {}))
 
+                    env (assoc env
+                               :let1 (list 'let1 [pattern expr] return)
+                               :build
+                               (fn let1-instance-build [env]
+                                 (let [bindings
+                                       (map (fn [sym]
+                                              [sym (build (cd env sym))])
+                                            (map first bindings))]
+                                   (list 'let
+                                         (reduce into [] bindings)
+                                         (build (cd env return-symbol))))))
+
                     bound
                     (reduce (fn [e [sym expr]]
                               (-> (bind e sym expr)
                                   (tree/put [sym] :local true)))
                             env bindings)]
 
-                (-> (bind bound
-                          return-symbol
-                          return)
-
-                    (assoc
-                     :let1 (list 'let1 [pattern expr] return)
-                     :build
-                     (fn let1-instance-build [env]
-                       (let [bindings
-                             (map (fn [sym]
-                                    [sym (build (cd env sym))])
-                                  (map first bindings))]
-                         (list 'let
-                               (reduce into [] bindings)
-                               (build (cd env return-symbol)))))))))))
+                (bind bound
+                      return-symbol
+                      return)))))
 
         (defprim let
           ;; TODO add named let (using lambda)
@@ -657,6 +667,8 @@
 
 
 ;; ---------------- SCRATCH_TESTS ---------------------
+
+(u/throws (prog (+ (the number 2) (the string 3))))
 
 (comment :current-tries
 

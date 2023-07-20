@@ -385,6 +385,7 @@
 
                     env (assoc env
                                :let1 (list 'let1 [pattern expr] return)
+                               :refine (fn [env t] (refine env [return-symbol] t))
                                :build
                                (fn let1-instance-build [env]
                                  (let [bindings
@@ -485,20 +486,23 @@
 
               (if recursive?
                 (assoc bound :build build-as-value)
-                (-> (assoc bound :build build-as-value)
-                    (assoc :bind
-                           (fn lambda-instance-bind [env args]
-                             (let [return-sym '__return__
-                                   return-path (conj (tree/position env) return-sym)
-                                   with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
-                                                         env
-                                                         captures)]
-                               (-> (bind with-captures
-                                         return-sym
-                                         (list 'let (vec (interleave argv args)) return))
-                                   (assoc :build
-                                          (fn [env]
-                                            (build (tree/at env return-path)))))))))))))
+                (assoc bound
+                       :build build-as-value
+                       :bind
+                       (fn lambda-instance-bind [env args]
+                         (let [return-sym '__return__
+                               return-path (conj (tree/position env) return-sym)
+                               with-captures (reduce (fn [e p] (tree/put e [(last p)] :link p))
+                                                     env
+                                                     captures)]
+                           (-> (bind with-captures
+                                     return-sym
+                                     (list 'let (vec (interleave argv args)) return))
+                               (assoc :build
+                                      (fn [env]
+                                        (build (tree/at env return-path)))
+                                      :refine
+                                      (fn [env t] (refine env [return-symbol] t)))))))))))
 
         (defprim binder
           :bind
@@ -663,10 +667,17 @@
   [& body]
   `(dbg (bind-prog ~(mapv quote/quote-wrap body))))
 
+(defmacro prog''
+  [& body]
+  `(bind-prog ~(mapv quote/quote-wrap body)))
+
 
 
 
 ;; ---------------- SCRATCH_TESTS ---------------------
+
+(prog add2 (fn [x y] (the number (c/+ (the number x) (the number y))))
+               (the string (add2 4 2)))
 
 (u/throws (prog (+ (the number 2) (the string 3))))
 
@@ -685,7 +696,7 @@
                f (fn [a b] (add2 a b))
                (f 1 2))
 
-         (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+         (prog add2 (fn [x y] (the number (c/+ (the number x) (the number y))))
                (the string (add2 4 2)))
 
          (u/throws (prog add2 (fn [x y] (c/+ (the number x) (the number y)))

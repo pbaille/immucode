@@ -270,6 +270,18 @@
                   env (cons (tree/position env) (:referenced-by env)))
           (tree/at (tree/position env))))
 
+    (defn unpropagated-refine
+      ([env t]
+       (let [pos (tree/position env)
+             target (target-node env)]
+         (let [f (get target :refine default-refine-method)]
+           (-> (f target t)
+               (tree/at pos)))))
+      ([env at t]
+       (tree/upd env
+                 (path/path at)
+                 #(unpropagated-refine % t))))
+
     (defn refine
       ([env t]
        (let [pos (tree/position env)
@@ -385,7 +397,18 @@
 
                     env (assoc env
                                :let1 (list 'let1 [pattern expr] return)
-                               :refine (fn [env t] (refine env [return-symbol] t))
+                               :refine
+                               (fn let1-instance-refine [env t]
+                                 (unpropagated-refine env [return-symbol] t))
+                               :on-refined-child
+                               (fn let1-instance-on-refined-child [env k]
+                                 (if (= k return-symbol)
+                                   (let [return-type (:type (cd env return-symbol))
+                                         next-type (types/intersect (:type env types/any) return-type)]
+                                     (if-not (= (:type env) next-type)
+                                       (propagate-refinement (assoc env :type next-type))
+                                       env))
+                                   env))
                                :build
                                (fn let1-instance-build [env]
                                  (let [bindings
@@ -676,10 +699,26 @@
 
 ;; ---------------- SCRATCH_TESTS ---------------------
 
-(prog add2 (fn [x y] (the number (c/+ (the number x) (the number y))))
-               (the string (add2 4 2)))
+(do :type-refinement
+    (do :basics
+        (prog (the number 2))
+        (prog (the number (c/+ 2 2)))
+        (prog (let [x 1] (the number (c/+ x 2))))
+        (prog (let [x 1] (the number x)))
+        (prog (let1 [x (the number 3)] x)))
+    (do :lambda-wrapped
+        (prog f (fn [x] (the number x))
+              (f 2))
+        (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+              (add2 4 2))
+        (prog add2 (fn [x y] (c/+ (the number x) (the number y)))
+              (the number (add2 4 2))))
+    (do :errors
+        (u/throws (prog (the string 3)))
+        (u/throws (prog (+ (the number 2) (the string 3))))
+        (u/throws (prog add2 (fn [x y] (the number (c/+ (the number x) (the number y))))
+                        (the string (add2 4 2))))))
 
-(u/throws (prog (+ (the number 2) (the string 3))))
 
 (comment :current-tries
 

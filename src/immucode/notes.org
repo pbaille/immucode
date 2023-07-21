@@ -201,7 +201,7 @@ reprise after long break
 still need to think about type propagation
 types ns is kind of useful, have to wire it properly into core
 *** do we really need =bubling-void= ?
-maybe the parent should be in charge to handle the refinement of iots children
+maybe the parent should be in charge to handle the refinement of its children
 we should still need some kind of reaction for the case a child is refined externally
 
 *** DONE typed functions
@@ -219,3 +219,10 @@ Nodes like let or lambda relies on their build method + a return child node to b
 This kind of 'scope' node should hold a :link to their return node and maybe defer (some) methods to it?
 The issue with the current way of handling this kind of node is that it do not work well with void bubbling.
 This kind of forward linkage could also result in stack overflows...
+** <2023-07-20 Thu>
+*** scope nodes
+those nodes who holds a =__return__= child are quite common. they maybe deserve a special top level key.
+How about =:return= ?
+If a node is s scope, where should we put its type ?
+on the =__return__= child ? probably not.
+this return child could be a special kind of node that defer everything to its parent...
